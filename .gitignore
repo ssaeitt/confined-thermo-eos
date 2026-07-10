@@ -1,0 +1,14 @@
+# MATLAB temporary and autosave artifacts
+*.asv
+*.mat
+*.mex*
+*.slxc
+.DS_Store
+
+# Microsoft Excel active session lock files
+~$*.xlsx
+~$*.xls
+
+# Local runtime directories and optimization output logs
+Matlab Outputs/
+/legacy_archive/
