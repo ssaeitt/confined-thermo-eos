@@ -14,7 +14,7 @@ classdef RockProperties
         w_Others (1,1) double {mustBeReal, mustBeNonnegative}
         w_TOC (1,1) double {mustBeReal, mustBeNonnegative}
         
-        % Composite Group Surface Energy Parameters [J or K-based scaling]
+        % Composite Group Surface Energy Parameters [J/mol or K-based basis]
         E_Silicates (1,1) double {mustBeReal, mustBeNonnegative}
         E_Carbonates (1,1) double {mustBeReal, mustBeNonnegative}
         E_Clays (1,1) double {mustBeReal, mustBeNonnegative}
@@ -49,7 +49,7 @@ classdef RockProperties
                 
                 % Assert mathematical mass normalization compliance
                 totalMass = sum(weights);
-                if abs(totalMass - 1.0) > 1e-7
+                if abs(totalMass - 1.0) > 1e-6
                     error('RockProperties:NormalizationFailure', ...
                         'Constructed mineral mass sum (%f) must be normalized to exactly 1.0.', totalMass);
                 end
@@ -75,7 +75,7 @@ classdef RockProperties
             
             % Locate core structural definitions from row signatures
             rowTypes = string(rawTable.("Mineral"));
-            energyIdx = find(rowTypes == "mineral_E");
+            energyIdx = find(rowTypes == "mineral_E", 1);
             weightRows = find(rowTypes == "mineral_w");
             
             if isempty(energyIdx) || isempty(weightRows)
@@ -85,7 +85,7 @@ classdef RockProperties
             % Locate target row index corresponding to the specified rock sample formation
             targetRowIdx = [];
             for idx = reshape(weightRows, 1, [])
-                if string(rawTable.("Rock"){idx}) == string(targetRockName)
+                if string(rawTable.("Rock")(idx)) == string(targetRockName)
                     targetRowIdx = idx;
                     break;
                 end
@@ -112,11 +112,11 @@ classdef RockProperties
             end
             
             % Isolate Array Vectors Based on Structural Group Mappings
-            silicate_indices  = [1, 2, 3];  % Quartz, Plagioclase, K-feldspar
-            carbonate_indices = [4, 5, 6];  % Calcite, Dolomite, Siderite
+            silicate_indices  = [1, 2, 3];     % Quartz, Plagioclase, K-feldspar
+            carbonate_indices = [4, 5, 6];     % Calcite, Dolomite, Siderite
             clay_indices      = [7, 8, 9, 10]; % Mica, Kaolinite, Chlorite, Smectite
-            others_indices    = [11, 12, 13]; % Pyrite, Fluorapatite, Gypsum
-            toc_index         = 14;         % Total Organic Carbon Explicit Group
+            others_indices    = [11, 12, 13];  % Pyrite, Fluorapatite, Gypsum
+            toc_index         = 14;            % Total Organic Carbon Explicit Group
             
             % Compute Raw Mass Accumulations per Allocation Block
             w_Sil_raw  = sum(w_raw(silicate_indices));
@@ -125,12 +125,12 @@ classdef RockProperties
             w_Oth_raw  = sum(w_raw(others_indices));
             w_TOC_raw  = w_raw(toc_index);
             
-            % Apply Group Energy Math Rule: Mass-Weighted Averages
-            E_Sil  = RockProperties.calculateWeightedEnergy(w_raw(silicate_indices),  E_raw(silicate_indices));
-            E_Car  = RockProperties.calculateWeightedEnergy(w_raw(carbonate_indices), E_raw(carbonate_indices));
-            E_Clay = RockProperties.calculateWeightedEnergy(w_raw(clay_indices),      E_raw(clay_indices));
-            E_Oth  = RockProperties.calculateWeightedEnergy(w_raw(others_indices),    E_raw(others_indices));
-            E_TOC  = E_raw(toc_index); % Independent base signature
+            % Apply Group Energy Math Rule via Fully-Qualified Package Call
+            E_Sil  = entities.RockProperties.calculateWeightedEnergy(w_raw(silicate_indices),  E_raw(silicate_indices));
+            E_Car  = entities.RockProperties.calculateWeightedEnergy(w_raw(carbonate_indices), E_raw(carbonate_indices));
+            E_Clay = entities.RockProperties.calculateWeightedEnergy(w_raw(clay_indices),      E_raw(clay_indices));
+            E_Oth  = entities.RockProperties.calculateWeightedEnergy(w_raw(others_indices),    E_raw(others_indices));
+            E_TOC  = E_raw(toc_index); 
             
             % Enforce Structural Normalization Across Collective Blocks
             sumRawWeights = w_Sil_raw + w_Car_raw + w_Clay_raw + w_Oth_raw + w_TOC_raw;
@@ -144,16 +144,14 @@ classdef RockProperties
             % Return configured and normalized class instance
             obj = entities.RockProperties(targetRockName, thetaVal, normalizedWeights, groupEnergies);
         end
-    end
-    
-    methods (Static, Access = private)
+        
         function E_avg = calculateWeightedEnergy(weights, energies)
             % Evaluates mass-weighted group energy profiles with division-by-zero protection
             sumW = sum(weights);
             if sumW > 0
                 E_avg = sum(weights .* energies) / sumW;
             else
-                E_avg = 0.0; % Handle edge cases where a formation lacks a group entirely
+                E_avg = 0.0; % Handle edge cases where a formation lacks a specific group entirely
             end
         end
     end
