@@ -56,7 +56,7 @@ classdef StabilityTester < handle
             [w_star, tpd_min, PL, Pc] = obj.minimizeTPD(x0, z, T, PV, PL0, lnphiV, ZV, r_cap);
             
             % Evaluate Stability Criteria & Assign Output Vectors
-            isUnstable = (tpd_min < 0);
+            isUnstable = (tpd_min < -1e-7);
             
             if isUnstable
                 epsK = 1e-14;
@@ -79,7 +79,7 @@ classdef StabilityTester < handle
             
             for it = 1:obj.MaxIterations
                 % 1) Evaluate trial liquid state at current PL
-                [lnphiL, ZL, ~, ~] = obj.EOS.calculateState(PL, T, w, -1, r_cap);
+                [lnphiL, ZL, ~, ~] = obj.EOS.calculateState(PL, T, w, 1, r_cap);
                 
                 % 2) Update densities and macroscopic capillary discontinuity
                 [rho_l, rho_v] = obj.calculatePhaseDensities(ZL, ZV, PL, PV, T);
@@ -110,8 +110,8 @@ classdef StabilityTester < handle
                     wf = obj.projectSimplex(w + obj.Delta * e_vec);
                     wb = obj.projectSimplex(w - obj.Delta * e_vec);
                     
-                    [lnphiL_f, ~, ~, ~] = obj.EOS.calculateState(PL, T, wf, -1, r_cap);
-                    [lnphiL_b, ~, ~, ~] = obj.EOS.calculateState(PL, T, wb, -1, r_cap);
+                    [lnphiL_f, ~, ~, ~] = obj.EOS.calculateState(PL, T, wf, 1, r_cap);
+                    [lnphiL_b, ~, ~, ~] = obj.EOS.calculateState(PL, T, wb, 1, r_cap);
                     
                     tf = obj.calculateTPDValue(wf, z, lnphiL_f, lnphiV, PL, PV);
                     tb = obj.calculateTPDValue(wb, z, lnphiL_b, lnphiV, PL, PV);
@@ -134,7 +134,7 @@ classdef StabilityTester < handle
             end
             
             % Final evaluation at the stationary minimiser
-            [lnphiL, ~, ~, ~] = obj.EOS.calculateState(PL, T, w, -1, r_cap);
+            [lnphiL, ~, ~, ~] = obj.EOS.calculateState(PL, T, w, 1, r_cap);
             tpd_min = obj.calculateTPDValue(w, z, lnphiL, lnphiV, PL, PV);
         end
         

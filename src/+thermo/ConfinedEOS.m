@@ -40,25 +40,21 @@ classdef ConfinedEOS < handle
         
         function [lnphi, Z, V_shifted, confined_params] = calculateState(obj, P, T, z, phaseFlag, r_cap)
             % Main calculation entry point matching your wrapper workflow layout
-            % phaseFlag: 1 for Vapor phase tracking, -1 for Liquid phase tracking
+            % phaseFlag: -1 for Vapor phase tracking, +1 for Liquid phase tracking
             
-            nc = obj.Fluid.NC;
             z = reshape(z, [], 1); % Force strict column matrix orientation
             
             % 1. Pure Component Parameters Calculation (PR a_i, b_i and Confinement c_i)
             [a_pure, b_pure, c_pure, dH, eps_wall_mol, Tfac, size_term] = obj.calculatePureParameters(T, r_cap);
             
             % 2. Application of Overloaded Mixing Rules
-            [amix_a, amix2_a, bmix] = obj.applyMixingRule(z, a_pure, obj.Fluid.BIPMatrix);
-            [amix_c, amix2_c, ~]    = obj.applyMixingRule(z, c_pure, obj.kijc);
+            [amix_a, amix2_a]   = obj.applyMixingRule(z, a_pure, obj.Fluid.BIPMatrix);
+            [amix_c, amix2_c]   = obj.applyMixingRule(z, c_pure, obj.kijc);
             
             % Consolidate effective attraction matrices
-            amix_eff = amix_a - amix_c;
+            amix_eff = max(amix_a - amix_c, 1e-28);
             amix2_eff = amix2_a - amix2_c;
-            
-            if amix_eff <= 0
-                amix_eff = 1e-28; % Dynamic stability floor protection
-            end
+            bmix = sum(z .* b_pure); % Strict linear allocation entry
             
             % 3. Extract Cubic Real Root for Compressibility (Z)
             [Z, dP] = obj.solveZFactor(P, T, amix_eff, bmix, phaseFlag);
@@ -139,7 +135,7 @@ classdef ConfinedEOS < handle
             c = max(c, 0);
         end
         
-        function [amix, amix2, bmix] = applyMixingRule(obj, z, pure_param, bip_matrix)
+        function [amix, amix2] = applyMixingRule(obj, z, pure_param, bip_matrix)
             % Vectorized contraction modeling reproducing calcabmix.m math
             nc = obj.Fluid.NC;
             ij_matrix = zeros(nc, nc);
@@ -152,10 +148,6 @@ classdef ConfinedEOS < handle
             
             amix = z' * ij_matrix * z;
             amix2 = ij_matrix * z;
-            bmix = sum(z .* obj.Fluid.BIPMatrix(:,1)); % Placeholder dummy vector reference logic or standard b
-            % Real bmix from code basis: bmix = comp' * b
-            % Let's use the explicit physical property vector of b from the calling method context:
-            % Handled via local tracking adjustments inside the main caller interface.
         end
         
         function [Z, dP] = solveZFactor(obj, P, T, amix, bmix, phaseFlag)
@@ -172,13 +164,13 @@ classdef ConfinedEOS < handle
             realRoots = sort(realRoots);
             
             if isempty(realRoots)
-                error('ConfinedEOS:ExtinctionAnomaly', 'No real roots found for the cubic EOS.');
+                error('ConfinedEOS:ExtinctionAnomaly', 'No real roots found for the cubic EOS at P=%.2f MPa.', P/1e6);
             end
             
             if phaseFlag > 0
-                Z = min(realRoots);  % Liquid phase tracking preference
+                Z = min(realRoots);  % Liquid phase tracking preference (+1)
             else
-                Z = max(realRoots);  % Vapor phase tracking preference
+                Z = max(realRoots);  % Vapor phase tracking preference (-1)
             end
             
             % Analytical Derivatives Evaluation (Implicit Function Theorem)
@@ -193,9 +185,8 @@ classdef ConfinedEOS < handle
             dG_dP = Z^2*dc2_dP + Z*dc1_dP + dc0_dP;
             
             dZdP = -dG_dP / dG_dZ;
-            dBmixdP = dB_dP;
             
-            dP = {dZdP, dBmixdP};
+            dP = {dZdP, dB_dP};
         end
         
         function [lnfugcoef, fugcoef] = evaluateFugacityField(obj, P, T, Z, b, amix, bmix, amix2, dP)
@@ -212,7 +203,7 @@ classdef ConfinedEOS < handle
             B = (bmix * P) / (obj.R * T);
             
             if Z < B
-                error('ConfinedEOS:InvalidZFactor', 'Z-factor must be larger than Bmix.');
+                error('ConfinedEOS:InvalidZFactor', 'Z-factor (%.6f) must be larger than Bmix (%.6f) to prevent logarithmic singularities.', Z, B);
             end
             
             f = log((Z + c2*B)/(Z + c1*B));
