@@ -5,7 +5,7 @@ classdef FluidProperties
     
     properties (SetAccess = private)
         ComponentNames (1,:) string   % Component identifiers (e.g., ["C1", "nC5"])
-        NC (1,1) double {mustBeInteger, mustBePositive} % Number of components
+        NC (1,1) double {mustBeInteger, mustBePositive} = 1 % Number of components with Fixed implicit default singularity guard
         
         % Core Cubic EOS Parameters
         Tc (1,:) double {mustBePositive, mustBeReal}    % Critical Temperature [K]
