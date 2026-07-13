@@ -73,13 +73,31 @@ classdef FluidProperties
     end
     
     methods (Static)
-        function obj = loadFromWorkbook(filePath)
+        function obj = loadFromWorkbook(filePath, selectedMixName)
             % Automates ingestion and extraction across distinct worksheet layers
             
             % 1. Ingest Pure Component Properties
             optsProps = detectImportOptions(filePath, 'Sheet', 'Comp_Props');
             optsProps.VariableNamingRule = 'preserve';
             propsTable = readtable(filePath, optsProps);
+            
+            % If a specific mixture name is requested, filter rows to maintain explicit subset sequence
+            if nargin > 1 && ~isempty(selectedMixName)
+                components = strsplit(string(selectedMixName), '-');
+                components = string(components);
+                
+                rowIndices = zeros(1, length(components));
+                for i = 1:length(components)
+                    idx = find(string(propsTable.("comp")) == components(i), 1);
+                    if isempty(idx)
+                        error('FluidProperties:ComponentNotFound', ...
+                            'Component "%s" specified in mixture "%s" was not found in the Comp_Props worksheet.', ...
+                            components(i), selectedMixName);
+                    end
+                    rowIndices(i) = idx;
+                end
+                propsTable = propsTable(rowIndices, :);
+            end
             
             names = propsTable.("comp");
             tc = propsTable.("Tc");
@@ -100,9 +118,18 @@ classdef FluidProperties
             bipRaw = table2array(bipTable(:, 2:end));
             
             % 3. Map Subset/Sequence Integrity
-            % Ensures that the sequence of components in 'BIP' aligns perfectly with 'Comp_Props'
+            % Ensures that the sequence of components in 'BIP' aligns perfectly with the filtered 'names'
             bipComponentOrder = string(bipTable.Properties.VariableNames(2:end));
-            [~, sortIdx] = intersect(bipComponentOrder, string(names), 'stable');
+            
+            sortIdx = zeros(1, length(names));
+            for i = 1:length(names)
+                idx = find(bipComponentOrder == string(names(i)), 1);
+                if isempty(idx)
+                    error('FluidProperties:BIPComponentNotFound', ...
+                        'Component "%s" was not found in the BIP worksheet headers.', names(i));
+                end
+                sortIdx(i) = idx;
+            end
             bipCorrected = bipRaw(sortIdx, sortIdx);
             
             % Instantiate the validated OOP Data Object
