@@ -86,7 +86,12 @@ classdef FlashEngine < handle
             lnK0  = log(max(K_init(:), 1e-14));
             lnPV0 = log(max(P_guess, 1e5));
 
-            lnPmech0 = ifelse(strcmpi(capMode, 'pl'), log(max(PL_init, 1e5)), log(max(Pcap_init, 10.0)));
+            % Native if/else block replaces legacy ifelse syntax failure
+            if strcmpi(capMode, 'pl')
+                lnPmech0 = log(max(PL_init, 1e5));
+            else
+                lnPmech0 = log(max(Pcap_init, 10.0)); % Clamp minimum Pc seed to 10 Pa
+            end
 
             u0 = [lnK0; lnPV0; lnPmech0];
 
@@ -112,7 +117,8 @@ classdef FlashEngine < handle
 
             % Validate convergence against trivial thermodynamic roots
             if max(abs(log(K_final))) < 1e-6
-                warning('FlashEngine:TrivialSolution', 'Solver converged to a near-trivial phase split.');
+warning('FlashEngine:TrivialSolution', ...
+                    'Solver converged to a near-trivial phase split (max|lnK| < 1e-6). Review pore size or temperature proximity to critical point.');
             end
 
             solverStats = stats;
@@ -163,6 +169,7 @@ classdef FlashEngine < handle
             end
 
             stats = struct('iterations', iter, 'residual_norm', norm_res, 'converged', false, 'history', iterLog(1:iter));
+            warning('FlashEngine:NonConvergence', 'Newton solver reached maximum iterations (%d) without achieving tolerance.', obj.MaxIterations);
         end
 
         function [u, stats] = executeBroydenSolver(obj, u0, T, z, r_cap, mode)
@@ -215,6 +222,7 @@ classdef FlashEngine < handle
             end
 
             stats = struct('iterations', iter, 'residual_norm', norm_res, 'converged', false, 'history', iterLog(1:iter));
+            warning('FlashEngine:NonConvergence', 'Quasi-Newton solver reached maximum iterations without achieving tolerance.');
         end
 
         function [F, stateData] = evaluateResidualVector(obj, u, T, z, r_cap, mode)
@@ -259,7 +267,11 @@ classdef FlashEngine < handle
             F(nc+1) = sum_x - 1.0;
 
             % Mechanical boundary closure
-            F(nc+2) = ifelse(strcmpi(mode, 'pl'), P_v - P_l - Pcap_pred, Pcap_pred - P_cap);
+            if strcmpi(mode, 'pl')
+                F(nc+2) = P_v - P_l - Pcap_pred;
+            else
+                F(nc+2) = Pcap_pred - P_cap;
+            end
 
             stateData = struct('P_v', P_v, 'P_l', P_l, 'P_cap', P_cap, 'Z_V', Z_V, 'Z_L', Z_L, 'x_norm', x_norm);
         end
@@ -277,11 +289,6 @@ classdef FlashEngine < handle
                 [res_pert, ~] = obj.evaluateResidualVector(u_pert, T, z, r_cap, mode);
                 J(:, j) = (res_pert - res0) / step;
             end
-        end
-
-        % Shorthand conditional helper method to match runner expressions natively
-        function val = ifelse(~, cond, trueVal, falseVal)
-            if cond, val = trueVal; else, val = falseVal; end
         end
 
         function Pcap = evaluateYoungLaplaceIFT(obj, x, y, rho_l_SI, rho_v_SI, r_cap)
