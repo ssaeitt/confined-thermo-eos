@@ -117,7 +117,7 @@ classdef FlashEngine < handle
 
             % Validate convergence against trivial thermodynamic roots
             if max(abs(log(K_final))) < 1e-6
-warning('FlashEngine:TrivialSolution', ...
+                warning('FlashEngine:TrivialSolution', ...
                     'Solver converged to a near-trivial phase split (max|lnK| < 1e-6). Review pore size or temperature proximity to critical point.');
             end
 
@@ -145,8 +145,13 @@ warning('FlashEngine:TrivialSolution', ...
                 % Compute Finite-Difference Jacobian Matrix
                 J = obj.computeNumericalJacobian(u, res, T, z, r_cap, mode);
 
-                % Solve damped linear system with regularization
-                step = -(J'*J + obj.JacRegularizer * eye(size(J))) \ (J' * res);
+                % Newton Step Update: Applies regularization parameter directly to J
+                % to maintain strict dimensional conditioning rules without squaring errors
+                J_reg = J;
+                if obj.JacRegularizer > 0
+                    J_reg = J_reg + obj.JacRegularizer * eye(size(J));
+                end
+                step = -J_reg \ res;
 
                 % Armijo Backtracking Line Search
                 alpha = 1.0;
@@ -181,6 +186,9 @@ warning('FlashEngine:TrivialSolution', ...
             % Seed initial Jacobian via finite differences
             J = obj.computeNumericalJacobian(u, res, T, z, r_cap, mode);
             B = J;
+            if obj.JacRegularizer > 0
+                B = B + obj.JacRegularizer * eye(size(B));
+            end
             iterLog = zeros(obj.MaxIterations, 1);
 
             for iter = 1:obj.MaxIterations
@@ -242,13 +250,27 @@ warning('FlashEngine:TrivialSolution', ...
             end
 
             % 2. Calculate trial liquid composition for dew-point tracing (x_i = z_i / K_i)
-            x_raw = z ./ K;
-            sum_x = sum(x_raw);
-            x_norm = x_raw / sum_x;
+            x_raw = z ./ max(K, 1e-14);
+            x_raw = max(x_raw, 1e-16);
+            sx = sum(x_raw);
+
+            if ~isfinite(sx) || sx <= 0
+                F = 1e3 * ones(nc + 2, 1);
+                stateData = struct('P_v', P_v, 'P_l', P_v, 'P_cap', 0, 'Z_V', 1, 'Z_L', 1, 'x_norm', z);
+                return;
+            end
+            x_norm = x_raw / sx;
 
             % 3. Evaluate Phase Fugacities and Molar Volumes via ConfinedEOS
-            [lnphi_V, Z_V, V_V] = obj.EOS.calculateState(P_v, T, z, -1, r_cap);
-            [lnphi_L, Z_L, V_L] = obj.EOS.calculateState(P_l, T, x_norm, 1, r_cap);
+            try
+                [lnphi_V, Z_V, V_V] = obj.EOS.calculateState(P_v, T, z, -1, r_cap);
+                [lnphi_L, Z_L, V_L] = obj.EOS.calculateState(P_l, T, x_norm, 1, r_cap);
+            catch
+                % Graceful execution escape gate to allow Armijo contraction step to shrink variables
+                F = 1e3 * ones(nc + 2, 1);
+                stateData = struct('P_v', P_v, 'P_l', P_v, 'P_cap', 0, 'Z_V', 1, 'Z_L', 1, 'x_norm', x_norm);
+                return;
+            end
 
             % 4. Evaluate MacLeod-Sugden Parachor Capillary Discontinuity
             rho_l_SI = 1.0 / V_L; % [mol/m^3]
@@ -264,7 +286,7 @@ warning('FlashEngine:TrivialSolution', ...
             F(1:nc) = log(K) - (lnphi_L - lnphi_V + log(P_l / P_v));
 
             % Stoichiometric mass balance (Dew point target): sum(z_i / K_i) - 1 = 0
-            F(nc+1) = sum_x - 1.0;
+            F(nc+1) = sx - 1.0;
 
             % Mechanical boundary closure
             if strcmpi(mode, 'pl')
@@ -305,10 +327,8 @@ warning('FlashEngine:TrivialSolution', ...
             rho_v_cgs = rho_v_SI * 1e-6;
 
             ift_param = sum(Pch .* (x .* rho_l_cgs - y .* rho_v_cgs));
-            ift_param = max(ift_param, 0.0);
-
-            sigma_mN_m = ift_param^4;       % Interfacial tension in dynes/cm (or mN/m)
-            sigma_N_m  = sigma_mN_m / 1000; % Convert to N/m
+            sigma_mN_m = max(ift_param, 0.0)^4;       % Interfacial tension in mN/m
+            sigma_N_m  = sigma_mN_m / 1000;            % Convert to N/m
 
             theta_rad = deg2rad(obj.EOS.Rock.Theta);
             Pcap = (2.0 * sigma_N_m * cos(theta_rad)) / r_cap;
