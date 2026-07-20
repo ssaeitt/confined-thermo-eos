@@ -244,21 +244,21 @@ classdef FlashEngine < handle
         function [F, stateData] = evaluateResidualVector(obj, u, T, z, r_cap, mode)
             % Evaluates the NC+2 residual vector for non-isobaric phase equilibrium
             nc = obj.EOS.Fluid.NC;
-
+            
             try
                 % 1. Unpack state coordinates
                 K    = exp(u(1:nc));
                 P_v  = exp(u(nc+1));
-
-                % --- TRIVIAL ROOT DEFLECTION GUARD ---
-                % If the step wanders toward the trivial solution (K -> 1),
-                % return a high penalty to force the Armijo line search to backtrack.
-                if max(abs(log(K))) < 1e-4
+                
+                % --- ENHANCED TRIVIAL ROOT DEFLECTION GUARD ---
+                % Widened from 1e-4 to 1e-2 to catch near-unity numerical sinks
+                % and force line-search backtracking away from the critical locus.
+                if max(abs(log(K))) < 1e-2
                     F = 1e3 * ones(nc + 2, 1);
                     stateData = struct('P_v', P_v, 'P_l', P_v, 'P_cap', 0, 'Z_V', 1, 'Z_L', 1, 'x_norm', z);
                     return;
                 end
-
+                
                 if strcmpi(mode, 'pl')
                     P_l   = exp(u(nc+2));
                     P_cap = max(P_v - P_l, 0.0);
