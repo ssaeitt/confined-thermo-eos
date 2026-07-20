@@ -231,64 +231,69 @@ classdef FlashEngine < handle
             % Evaluates the NC+2 residual vector for non-isobaric phase equilibrium
             nc = obj.EOS.Fluid.NC;
 
-            % 1. Unpack state coordinates
-            K    = exp(u(1:nc));
-            P_v  = exp(u(nc+1));
-
-            if strcmpi(mode, 'pl')
-                P_l   = exp(u(nc+2));
-                P_cap = max(P_v - P_l, 0.0);
-            else
-                P_cap = exp(u(nc+2));
-                P_l   = max(P_v - P_cap, 1e3);
-            end
-
-            % 2. Calculate trial liquid composition for dew-point tracing (x_i = z_i / K_i)
-            x_raw = z ./ max(K, 1e-14);
-            x_raw = max(x_raw, 1e-16);
-            sx = sum(x_raw);
-
-            if ~isfinite(sx) || sx <= 0
-                F = 1e3 * ones(nc + 2, 1);
-                stateData = struct('P_v', P_v, 'P_l', P_v, 'P_cap', 0, 'Z_V', 1, 'Z_L', 1, 'x_norm', z);
-                return;
-            end
-            x_norm = x_raw / sx;
-
-            % 3. Evaluate Phase Fugacities and Molar Volumes via ConfinedEOS
             try
+                % 1. Unpack state coordinates
+                K    = exp(u(1:nc));
+                P_v  = exp(u(nc+1));
+
+                if strcmpi(mode, 'pl')
+                    P_l   = exp(u(nc+2));
+                    P_cap = max(P_v - P_l, 0.0);
+                else
+                    P_cap = exp(u(nc+2));
+                    P_l   = max(P_v - P_cap, 1e3);
+                end
+
+                % 2. Calculate trial liquid composition for dew-point tracing (x_i = z_i / K_i)
+                x_raw = z ./ max(K, 1e-14);
+                x_raw = max(x_raw, 1e-16);
+                sx = sum(x_raw);
+
+                if ~isfinite(sx) || sx <= 0
+                    F = 1e3 * ones(nc + 2, 1);
+                    stateData = struct('P_v', P_v, 'P_l', P_v, 'P_cap', 0, 'Z_V', 1, 'Z_L', 1, 'x_norm', z);
+                    return;
+                end
+                x_norm = x_raw / sx;
+
+                % 3. Evaluate Phase Fugacities and Molar Volumes via ConfinedEOS
                 [lnphi_V, Z_V, V_V] = obj.EOS.calculateState(P_v, T, z, -1, r_cap);
                 [lnphi_L, Z_L, V_L] = obj.EOS.calculateState(P_l, T, x_norm, 1, r_cap);
+
+                % 4. Evaluate MacLeod-Sugden Parachor Capillary Discontinuity
+                rho_l_SI = 1.0 / V_L; % [mol/m^3]
+                rho_v_SI = 1.0 / V_V; % [mol/m^3]
+
+                Pcap_pred = obj.evaluateYoungLaplaceIFT(x_norm, z, rho_l_SI, rho_v_SI, r_cap);
+
+                % 5. Assemble Residual Equations
+                F = zeros(nc + 2, 1);
+
+                % Chemical potential equality (Iso-fugacity with pressure jump):
+                F(1:nc) = log(K) - (lnphi_L - lnphi_V + log(P_l) - log(P_v));
+
+                % Stoichiometric mass balance (Dew point target): sum(z_i / K_i) - 1 = 0
+                F(nc+1) = sx - 1.0;
+
+                % Mechanical boundary closure
+                if strcmpi(mode, 'pl')
+                    F(nc+2) = P_v - P_l - Pcap_pred;
+                else
+                    F(nc+2) = Pcap_pred - P_cap;
+                end
+
+                % Final check to prevent any accidental unphysical NaN leakage
+                if any(~isfinite(F))
+                    F = 1e3 * ones(nc + 2, 1);
+                end
+                stateData = struct('P_v', P_v, 'P_l', P_l, 'P_cap', P_cap, 'Z_V', Z_V, 'Z_L', Z_L, 'x_norm', x_norm);
+
             catch
-                % Graceful execution escape gate to allow Armijo contraction step to shrink variables
+                % Total fallback isolation envelope to ensure line-search backtrack triggered cleanly
                 F = 1e3 * ones(nc + 2, 1);
-                stateData = struct('P_v', P_v, 'P_l', P_v, 'P_cap', 0, 'Z_V', 1, 'Z_L', 1, 'x_norm', x_norm);
+                stateData = struct('P_v', exp(u(nc+1)), 'P_l', exp(u(nc+1)), 'P_cap', 0, 'Z_V', 1, 'Z_L', 1, 'x_norm', z);
                 return;
             end
-
-            % 4. Evaluate MacLeod-Sugden Parachor Capillary Discontinuity
-            rho_l_SI = 1.0 / V_L; % [mol/m^3]
-            rho_v_SI = 1.0 / V_V; % [mol/m^3]
-
-            Pcap_pred = obj.evaluateYoungLaplaceIFT(x_norm, z, rho_l_SI, rho_v_SI, r_cap);
-
-            % 5. Assemble Residual Equations
-            F = zeros(nc + 2, 1);
-
-            % Chemical potential equality (Iso-fugacity with pressure jump):
-            F(1:nc) = log(K) - (lnphi_L - lnphi_V + log(P_l / P_v));
-
-            % Stoichiometric mass balance (Dew point target): sum(z_i / K_i) - 1 = 0
-            F(nc+1) = sx - 1.0;
-
-            % Mechanical boundary closure
-            if strcmpi(mode, 'pl')
-                F(nc+2) = P_v - P_l - Pcap_pred;
-            else
-                F(nc+2) = Pcap_pred - P_cap;
-            end
-
-            stateData = struct('P_v', P_v, 'P_l', P_l, 'P_cap', P_cap, 'Z_V', Z_V, 'Z_L', Z_L, 'x_norm', x_norm);
         end
 
         function J = computeProjectedCentralJacobian(obj, u, T, z, r_cap, mode, lnPV_min, lnPV_max)
@@ -316,14 +321,14 @@ classdef FlashEngine < handle
                     u_pert = u_f_proj; u_pert(j) = u_f_proj(j) + h;
                     u_pert_proj = obj.projectFeasibleDomain(u_pert, mode, r_cap, lnPV_min, lnPV_max);
 
-                    res0 = obj.evaluateResidualVector(u_f_proj, T, z, r_cap, mode);
-                    res_pert = obj.evaluateResidualVector(u_pert_proj, T, z, r_cap, mode);
+                    [res0, ~] = obj.evaluateResidualVector(u_f_proj, T, z, r_cap, mode);
+                    [res_pert, ~] = obj.evaluateResidualVector(u_pert_proj, T, z, r_cap, mode);
 
                     denom_fwd = u_pert_proj(j) - u_f_proj(j);
                     J(:, j) = (res_pert - res0) / max(denom_fwd, 1e-10);
                 else
-                    res_f = obj.evaluateResidualVector(u_f_proj, T, z, r_cap, mode);
-                    res_b = obj.evaluateResidualVector(u_b_proj, T, z, r_cap, mode);
+                    [res_f, ~] = obj.evaluateResidualVector(u_f_proj, T, z, r_cap, mode);
+                    [res_b, ~] = obj.evaluateResidualVector(u_b_proj, T, z, r_cap, mode);
                     J(:, j) = (res_f - res_b) / denom;
                 end
             end
@@ -363,7 +368,11 @@ classdef FlashEngine < handle
                 margin = log(1 + 1e-5);
                 u_proj(n+2) = min(u_proj(n+2), u_proj(n+1) - margin);
             elseif strcmpi(mode, 'pl')
-                if ~isinf(r_cap)
+                if isinf(r_cap)
+                    % CORRECTED: Binds unconfined liquid pressure boundaries 
+                    % to prevent unphysical out-of-bounds parameter execution drift
+                    u_proj(n+2) = min(max(u_proj(n+2), lnPV_min), lnPV_max);
+                else
                     u_proj(n+2) = min(u_proj(n+2), u_proj(n+1));
                 end
             end
