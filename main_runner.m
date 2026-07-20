@@ -6,7 +6,6 @@ clc; clear; close all;
 format shortG;
 
 % 1. INITIALIZE WORKSPACE & NAMESPACE PATHS
-% Ensure the package source directory is accessible to the MATLAB runtime
 if ~isfolder('src')
     error('ArchitectureError:MissingSource', 'The "src" directory was not found. Ensure you are running from the repository root.');
 end
@@ -22,7 +21,7 @@ if ~isfile(xlsxPath)
 end
 
 fprintf('===================================================================\n');
-fprintf('   NANOPOROUS CONFINEMENT PDEW PREDICTION ENGINE (OOP V1.0)        \n');
+fprintf('   NANOPOROUS CONFINEMENT PDEW PREDICTION ENGINE (OOP V1.1)        \n');
 fprintf('===================================================================\n\n');
 
 %% 2. INTERACTIVE RESEARCH PARAMETER & MIXTURE CONFIGURATION
@@ -68,7 +67,6 @@ P_guess_Pa = P_guess_MPa * 1e6;
 fprintf('\n[1/4] Ingesting database entities from workbook: %s...\n', xlsxPath);
 
 % Load fluid properties filtered specifically for the chosen mixture components
-% (Note: Your FluidProperties.loadFromWorkbook should accept selectedMixName to filter rows)
 fluid = entities.FluidProperties.loadFromWorkbook(xlsxPath, selectedMixName);
 rock  = entities.RockProperties.loadFromWorkbook(xlsxPath, selectedRock);
 
@@ -161,7 +159,7 @@ end
 fprintf('      -> TIP Matrix Configured (Inverse-Disparity Model | TOC = %.2f%%)\n', w_TOC * 100);
 
 % 5. Instantiate Thermodynamic Engine with Computed Matrix
-eos = thermo.ConfinedEOS(fluid, rock, 'kijc', kijc_matrix, 'k', 0.05, 'lambda', 0.1);
+eos = thermo.ConfinedEOS(fluid, rock, 'kijc', kijc_matrix);
 
 %% 5. INSTANTIATE NUMERICAL SOLVER ENGINES
 fprintf('[3/4] Assembling non-isobaric Tangent Plane Distance (TPD) stability tester...\n');
@@ -170,25 +168,43 @@ stability = solvers.StabilityTester(eos, 'MaxIterations', 500, 'GradTolerance', 
 fprintf('[4/4] Initializing hybrid Newton-Raphson FlashEngine...\n');
 flash = solvers.FlashEngine(eos, stability, 'MaxIterations', 1000, 'Tolerance', 1e-8);
 
-%% 6. EXECUTE NON-ISOBARIC DEW-POINT PREDICTION
-
-fprintf('\nExecuting VLE Flash Calculation at T = %.2f K | r_cap = %.2f nm...\n', T_K, r_nm);
+%% 6. EXECUTE TWO-STAGE SATURATION POINT MOLECULAR CONTINUATION
 tic;
 
-% Run solver with automatic mode selection ('Pc' for confinement, 'PL' for bulk)
-[Pdew_Pa, K_factors, Pcap_Pa, Pliq_Pa, stats] = flash.solveDewPoint( ...
-    T_K, P_guess_Pa, z_feed, r_cap, ...
-    'Solver', 'newton', ...
-    'CapMode', 'Pc');
+% --- STAGE 1: UNCONFINED BULK CALIBRATION ANCHOR ---
+fprintf('\nExecuting Stage 1: Solving Unconfined Bulk Saturation Boundary...\n');
+[P_bulk, K_bulk, ~, ~, bulk_stats] = flash.solveDewPoint(...
+    T_K, P_guess_Pa, z_feed, Inf, 'Solver', 'newton');
+
+if bulk_stats.converged
+    fprintf('      -> Bulk Stage Converged at %.4f MPa (%.2f psia)\n', P_bulk/1e6, P_bulk/6894.757);
+    K_seed = K_bulk;
+    P_start = P_bulk;
+else
+    fprintf('      -> Bulk Stage Stalled. Falling back to empirical seeds.\n');
+    K_seed = [];
+    P_start = P_guess_Pa;
+end
+
+% --- STAGE 2: NON-ISOBARIC CONFINED STEADY SWEEP ---
+if isinf(r_cap)
+    % System is open-channel bulk; bypass second evaluation stage
+    Pdew_Pa = P_bulk; K_factors = K_bulk; Pcap_Pa = 0.0; Pliq_Pa = P_bulk; stats = bulk_stats;
+else
+    fprintf('\nExecuting Stage 2: Tracing Confined Boundary at r_cap = %.2f nm...\n', r_nm);
+    [Pdew_Pa, K_factors, Pcap_Pa, Pliq_Pa, stats] = flash.solveDewPoint(...
+        T_K, P_start, z_feed, r_cap, ...
+        'Solver', 'newton', 'CapMode', 'Pc', ...
+        'K_seed', K_seed, 'Pcap_seed', 1e4);
+end
 
 execTime = toc;
 
 %% 7. DIAGNOSTIC REPORT & THERMODYNAMIC SUMMARY
 psi2Pa = 6894.757;
-Pdew_MPa = Pdew_Pa / 1e6;
-Pdew_psi = Pdew_Pa / psi2Pa;
-Pcap_MPa = Pcap_Pa / 1e6;
-Pliq_MPa = Pliq_Pa / 1e6;
+Pdew_MPa = Pdew_Pa / 1e6;   Pdew_psi = Pdew_Pa / psi2Pa;
+Pcap_MPa = Pcap_Pa / 1e6;   Pcap_psi = Pcap_Pa / psi2Pa;
+Pliq_MPa = Pliq_Pa / 1e6;   Pliq_psi = Pliq_Pa / psi2Pa;
 
 fprintf('\n===================================================================\n');
 fprintf('                 CONVERGED EQUILIBRIUM STATE REPORT                \n');

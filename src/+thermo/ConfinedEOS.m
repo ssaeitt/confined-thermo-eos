@@ -10,10 +10,10 @@ classdef ConfinedEOS < handle
     
     properties (Access = public)
         % Customizable Tuning Interaction Parameters (TIP framework fitting coefficients)
-        k (1,1) double = 0.0            % Base confinement structural multiplier
-        lambda (1,1) double = 0.0       % Acentric scaling tuning coefficient
-        pT_wall (1,1) double = 1.0      % Pore-geometry rational exponent power
-        kijc (:,:) double = []          % Confinement interaction parameter matrix [NC x NC]
+        k (1,1) double = 64.4376            % Base confinement structural multiplier
+        lambda (1,1) double = 10.0338       % Acentric scaling tuning coefficient
+        pT_wall (1,1) double = 1.3745       % Pore-geometry rational exponent power
+        kijc (:,:) double = []              % Confinement interaction parameter matrix [NC x NC]
     end
     
     properties (Constant, Access = private)
