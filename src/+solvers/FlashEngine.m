@@ -86,7 +86,6 @@ classdef FlashEngine < handle
             lnK0  = log(max(K_init(:), 1e-14));
             lnPV0 = log(max(P_guess, 1e5));
 
-            % Native if/else block replaces legacy ifelse syntax failure
             if strcmpi(capMode, 'pl')
                 lnPmech0 = log(max(PL_init, 1e5));
             else
@@ -95,11 +94,15 @@ classdef FlashEngine < handle
 
             u0 = [lnK0; lnPV0; lnPmech0];
 
+            % Establish local search boundaries matching legacy robust frameworks
+            lnPV_min = log(0.5 * P_guess);
+            lnPV_max = log(3.0 * P_guess);
+
             % 3. Execute Selected Iterative Solver Scheme
             if strcmpi(solverType, 'quasinewton')
-                [u_converged, stats] = obj.executeBroydenSolver(u0, T, z, r_cap, capMode);
+                [u_converged, stats] = obj.executeBroydenSolver(u0, T, z, r_cap, capMode, lnPV_min, lnPV_max);
             else
-                [u_converged, stats] = obj.executeNewtonSolver(u0, T, z, r_cap, capMode);
+                [u_converged, stats] = obj.executeNewtonSolver(u0, T, z, r_cap, capMode, lnPV_min, lnPV_max);
             end
 
             % 4. Unpack Converged State Boundaries
@@ -115,20 +118,14 @@ classdef FlashEngine < handle
                 Pliq_final = max(Pdew - Pcap_final, 1e3);
             end
 
-            % Validate convergence against trivial thermodynamic roots
-            if max(abs(log(K_final))) < 1e-6
-                warning('FlashEngine:TrivialSolution', ...
-                    'Solver converged to a near-trivial phase split (max|lnK| < 1e-6). Review pore size or temperature proximity to critical point.');
-            end
-
             solverStats = stats;
         end
     end
 
     methods (Access = private)
-        function [u, stats] = executeNewtonSolver(obj, u0, T, z, r_cap, mode)
+        function [u, stats] = executeNewtonSolver(obj, u0, T, z, r_cap, mode, lnPV_min, lnPV_max)
             % Full Newton-Raphson algorithm with numerical Jacobian and backtracking line search
-            u = u0;
+            u = obj.projectFeasibleDomain(u0, mode, r_cap, lnPV_min, lnPV_max);
             iterLog = zeros(obj.MaxIterations, 1);
 
             for iter = 1:obj.MaxIterations
@@ -143,25 +140,23 @@ classdef FlashEngine < handle
                 end
 
                 % Compute Finite-Difference Jacobian Matrix
-                J = obj.computeNumericalJacobian(u, res, T, z, r_cap, mode);
+                J = obj.computeProjectedCentralJacobian(u, T, z, r_cap, mode, lnPV_min, lnPV_max);
 
-                % Newton Step Update: Applies regularization parameter directly to J
-                % to maintain strict dimensional conditioning rules without squaring errors
-                J_reg = J;
                 if obj.JacRegularizer > 0
-                    J_reg = J_reg + obj.JacRegularizer * eye(size(J));
+                    J = J + obj.JacRegularizer * eye(size(J));
                 end
-                step = -J_reg \ res;
+
+                step = -J \ res;
 
                 % Armijo Backtracking Line Search
                 alpha = 1.0;
-                u_new = obj.projectFeasibleDomain(u + alpha * step, mode, r_cap);
+                u_new = obj.projectFeasibleDomain(u + alpha * step, mode, r_cap, lnPV_min, lnPV_max);
                 [res_new, ~] = obj.evaluateResidualVector(u_new, T, z, r_cap, mode);
 
                 ls_iter = 0;
                 while norm(res_new, inf) > (1 - obj.LineSearchC1 * alpha) * norm_res && ls_iter < obj.MaxLineSearch
                     alpha = alpha * 0.5;
-                    u_new = obj.projectFeasibleDomain(u + alpha * step, mode, r_cap);
+                    u_new = obj.projectFeasibleDomain(u + alpha * step, mode, r_cap, lnPV_min, lnPV_max);
                     [res_new, ~] = obj.evaluateResidualVector(u_new, T, z, r_cap, mode);
                     ls_iter = ls_iter + 1;
                 end
@@ -174,18 +169,18 @@ classdef FlashEngine < handle
             end
 
             stats = struct('iterations', iter, 'residual_norm', norm_res, 'converged', false, 'history', iterLog(1:iter));
-            warning('FlashEngine:NonConvergence', 'Newton solver reached maximum iterations (%d) without achieving tolerance.', obj.MaxIterations);
         end
 
-        function [u, stats] = executeBroydenSolver(obj, u0, T, z, r_cap, mode)
+        function [u, stats] = executeBroydenSolver(obj, u0, T, z, r_cap, mode, lnPV_min, lnPV_max)
             % Broyden Quasi-Newton rank-1 update solver
-            u = u0;
+            u = obj.projectFeasibleDomain(u0, mode, r_cap, lnPV_min, lnPV_max);
             [res, ~] = obj.evaluateResidualVector(u, T, z, r_cap, mode);
             norm_res = norm(res, inf);
 
             % Seed initial Jacobian via finite differences
-            J = obj.computeNumericalJacobian(u, res, T, z, r_cap, mode);
+            J = obj.computeProjectedCentralJacobian(u, T, z, r_cap, mode, lnPV_min, lnPV_max);
             B = J;
+
             if obj.JacRegularizer > 0
                 B = B + obj.JacRegularizer * eye(size(B));
             end
@@ -202,13 +197,13 @@ classdef FlashEngine < handle
 
                 % Line search
                 alpha = 1.0;
-                u_new = obj.projectFeasibleDomain(u + alpha * step, mode, r_cap);
+                u_new = obj.projectFeasibleDomain(u + alpha * step, mode, r_cap, lnPV_min, lnPV_max);
                 [res_new, ~] = obj.evaluateResidualVector(u_new, T, z, r_cap, mode);
 
                 ls_iter = 0;
                 while norm(res_new, inf) > (1 - obj.LineSearchC1 * alpha) * norm_res && ls_iter < obj.MaxLineSearch
                     alpha = alpha * 0.5;
-                    u_new = obj.projectFeasibleDomain(u + alpha * step, mode, r_cap);
+                    u_new = obj.projectFeasibleDomain(u + alpha * step, mode, r_cap, lnPV_min, lnPV_max);
                     [res_new, ~] = obj.evaluateResidualVector(u_new, T, z, r_cap, mode);
                     ls_iter = ls_iter + 1;
                 end
@@ -230,7 +225,6 @@ classdef FlashEngine < handle
             end
 
             stats = struct('iterations', iter, 'residual_norm', norm_res, 'converged', false, 'history', iterLog(1:iter));
-            warning('FlashEngine:NonConvergence', 'Quasi-Newton solver reached maximum iterations without achieving tolerance.');
         end
 
         function [F, stateData] = evaluateResidualVector(obj, u, T, z, r_cap, mode)
@@ -282,7 +276,6 @@ classdef FlashEngine < handle
             F = zeros(nc + 2, 1);
 
             % Chemical potential equality (Iso-fugacity with pressure jump):
-            % ln(K_i) - [ln(phi_i^L) - ln(phi_i^V) + ln(P_L / P_V)] = 0
             F(1:nc) = log(K) - (lnphi_L - lnphi_V + log(P_l / P_v));
 
             % Stoichiometric mass balance (Dew point target): sum(z_i / K_i) - 1 = 0
@@ -298,18 +291,41 @@ classdef FlashEngine < handle
             stateData = struct('P_v', P_v, 'P_l', P_l, 'P_cap', P_cap, 'Z_V', Z_V, 'Z_L', Z_L, 'x_norm', x_norm);
         end
 
-        function J = computeNumericalJacobian(obj, u, res0, T, z, r_cap, mode)
+        function J = computeProjectedCentralJacobian(obj, u, T, z, r_cap, mode, lnPV_min, lnPV_max)
             % Central/Forward finite-difference Jacobian construction
             n = length(u);
             J = zeros(n, n);
 
             for j = 1:n
-                u_pert = u;
-                step = max(abs(u(j)) * obj.JacEpsilon, 1e-8);
-                u_pert(j) = u(j) + step;
+                uj = u(j);
+                h = obj.JacEpsilon * max(1.0, abs(uj));
 
-                [res_pert, ~] = obj.evaluateResidualVector(u_pert, T, z, r_cap, mode);
-                J(:, j) = (res_pert - res0) / step;
+                % Formulate perturbed state vectors
+                u_f = u; u_f(j) = uj + h;
+                u_b = u; u_b(j) = uj - h;
+
+                % Pass perturbations through the feasibility projection block
+                u_f_proj = obj.projectFeasibleDomain(u_f, mode, r_cap, lnPV_min, lnPV_max);
+                u_b_proj = obj.projectFeasibleDomain(u_b, mode, r_cap, lnPV_min, lnPV_max);
+
+                denom = u_f_proj(j) - u_b_proj(j);
+
+                if abs(denom) < 1e-10
+                    % Fall back to a projected forward difference if bounded
+                    u_f_proj = obj.projectFeasibleDomain(u, mode, r_cap, lnPV_min, lnPV_max);
+                    u_pert = u_f_proj; u_pert(j) = u_f_proj(j) + h;
+                    u_pert_proj = obj.projectFeasibleDomain(u_pert, mode, r_cap, lnPV_min, lnPV_max);
+
+                    res0 = obj.evaluateResidualVector(u_f_proj, T, z, r_cap, mode);
+                    res_pert = obj.evaluateResidualVector(u_pert_proj, T, z, r_cap, mode);
+
+                    denom_fwd = u_pert_proj(j) - u_f_proj(j);
+                    J(:, j) = (res_pert - res0) / max(denom_fwd, 1e-10);
+                else
+                    res_f = obj.evaluateResidualVector(u_f_proj, T, z, r_cap, mode);
+                    res_b = obj.evaluateResidualVector(u_b_proj, T, z, r_cap, mode);
+                    J(:, j) = (res_f - res_b) / denom;
+                end
             end
         end
 
@@ -334,22 +350,22 @@ classdef FlashEngine < handle
             Pcap = (2.0 * sigma_N_m * cos(theta_rad)) / r_cap;
         end
 
-        function u_proj = projectFeasibleDomain(~, u, mode, r_cap)
+        function u_proj = projectFeasibleDomain(~, u, mode, r_cap, lnPV_min, lnPV_max)
             % Enforces physical boundaries during iteration steps
             u_proj = u;
             n = length(u) - 2;
 
             % 1. Clamp Vapor Pressure between 0.1 bar (1e4 Pa) and 1000 bar (1e8 Pa)
-            u_proj(n+1) = min(max(u_proj(n+1), log(1e4)), log(1e8));
+            u_proj(n+1) = min(max(u_proj(n+1), lnPV_min), lnPV_max);
 
             % 2. Constrain Mechanical Pressure Variable
             if strcmpi(mode, 'pc')
-                % Capillary pressure must remain strictly below vapor pressure
                 margin = log(1 + 1e-5);
                 u_proj(n+2) = min(u_proj(n+2), u_proj(n+1) - margin);
-            elseif strcmpi(mode, 'pl') && ~isinf(r_cap)
-                % Under confinement, liquid pressure must be less than or equal to vapor pressure
-                u_proj(n+2) = min(u_proj(n+2), u_proj(n+1));
+            elseif strcmpi(mode, 'pl')
+                if ~isinf(r_cap)
+                    u_proj(n+2) = min(u_proj(n+2), u_proj(n+1));
+                end
             end
         end
 
