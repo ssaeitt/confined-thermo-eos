@@ -22,6 +22,10 @@ classdef RockProperties
         E_TOC (1,1) double {mustBeReal, mustBeNonnegative}
     end
     
+    properties (Constant, Access = private)
+        R double = 8.3144621            % Universal Gas Constant for K -> J/mol conversion
+    end
+
     properties (Dependent)
         WeightVector (1,5) double      % Consolidated vector [Sil, Carb, Clay, Oth, TOC]
         EnergyVector (1,5) double      % Consolidated vector [Sil, Carb, Clay, Oth, TOC]
@@ -139,7 +143,9 @@ classdef RockProperties
             end
             
             normalizedWeights = [w_Sil_raw, w_Car_raw, w_Clay_raw, w_Oth_raw, w_TOC_raw] ./ sumRawWeights;
-            groupEnergies     = [E_Sil, E_Car, E_Clay, E_Oth, E_TOC];
+
+            R_val = entities.RockProperties.R;
+            groupEnergies     = [E_Sil, E_Car, E_Clay, E_Oth, E_TOC] * R_val;
             
             % Return configured and normalized class instance
             obj = entities.RockProperties(targetRockName, thetaVal, normalizedWeights, groupEnergies);
