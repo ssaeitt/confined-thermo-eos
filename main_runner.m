@@ -188,15 +188,15 @@ end
 
 % --- STAGE 2: NON-ISOBARIC CONFINED STEADY SWEEP ---
 if isinf(r_cap)
+    % System is open-channel bulk; bypass second evaluation stage
     Pdew_Pa = P_bulk; K_factors = K_bulk; Pcap_Pa = 0.0; Pliq_Pa = P_bulk; stats = bulk_stats;
 else
     fprintf('\nExecuting Stage 2: Tracing Confined Boundary at r_cap = %.2f nm...\n', r_nm);
-    % Omit K_seed to force Stage 2 to use the internal StabilityTester
-    % to find the true non-trivial confined phase coordinates at P_start
+    % CORRECTED: Re-inject K_bulk to anchor the solver to the upper retrograde branch
     [Pdew_Pa, K_factors, Pcap_Pa, Pliq_Pa, stats] = flash.solveDewPoint(...
         T_K, P_start, z_feed, r_cap, ...
         'Solver', 'newton', 'CapMode', 'Pc', ...
-        'K_seed', [], 'Pcap_seed', 1e4);
+        'K_seed', K_bulk, 'Pcap_seed', 1e4);
 end
 
 execTime = toc;
