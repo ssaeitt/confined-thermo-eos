@@ -236,6 +236,15 @@ classdef FlashEngine < handle
                 K    = exp(u(1:nc));
                 P_v  = exp(u(nc+1));
 
+                % --- TRIVIAL ROOT DEFLECTION GUARD ---
+                % If the step wanders toward the trivial solution (K -> 1),
+                % return a high penalty to force the Armijo line search to backtrack.
+                if max(abs(log(K))) < 1e-4
+                    F = 1e3 * ones(nc + 2, 1);
+                    stateData = struct('P_v', P_v, 'P_l', P_v, 'P_cap', 0, 'Z_V', 1, 'Z_L', 1, 'x_norm', z);
+                    return;
+                end
+
                 if strcmpi(mode, 'pl')
                     P_l   = exp(u(nc+2));
                     P_cap = max(P_v - P_l, 0.0);
@@ -261,35 +270,27 @@ classdef FlashEngine < handle
                 [lnphi_L, Z_L, V_L] = obj.EOS.calculateState(P_l, T, x_norm, 1, r_cap);
 
                 % 4. Evaluate MacLeod-Sugden Parachor Capillary Discontinuity
-                rho_l_SI = 1.0 / V_L; % [mol/m^3]
-                rho_v_SI = 1.0 / V_V; % [mol/m^3]
-
+                rho_l_SI = 1.0 / V_L;
+                rho_v_SI = 1.0 / V_V;
                 Pcap_pred = obj.evaluateYoungLaplaceIFT(x_norm, z, rho_l_SI, rho_v_SI, r_cap);
 
                 % 5. Assemble Residual Equations
                 F = zeros(nc + 2, 1);
-
-                % Chemical potential equality (Iso-fugacity with pressure jump):
                 F(1:nc) = log(K) - (lnphi_L - lnphi_V + log(P_l) - log(P_v));
-
-                % Stoichiometric mass balance (Dew point target): sum(z_i / K_i) - 1 = 0
                 F(nc+1) = sx - 1.0;
 
-                % Mechanical boundary closure
                 if strcmpi(mode, 'pl')
                     F(nc+2) = P_v - P_l - Pcap_pred;
                 else
                     F(nc+2) = Pcap_pred - P_cap;
                 end
 
-                % Final check to prevent any accidental unphysical NaN leakage
                 if any(~isfinite(F))
                     F = 1e3 * ones(nc + 2, 1);
                 end
                 stateData = struct('P_v', P_v, 'P_l', P_l, 'P_cap', P_cap, 'Z_V', Z_V, 'Z_L', Z_L, 'x_norm', x_norm);
 
             catch
-                % Total fallback isolation envelope to ensure line-search backtrack triggered cleanly
                 F = 1e3 * ones(nc + 2, 1);
                 stateData = struct('P_v', exp(u(nc+1)), 'P_l', exp(u(nc+1)), 'P_cap', 0, 'Z_V', 1, 'Z_L', 1, 'x_norm', z);
                 return;
@@ -369,7 +370,7 @@ classdef FlashEngine < handle
                 u_proj(n+2) = min(u_proj(n+2), u_proj(n+1) - margin);
             elseif strcmpi(mode, 'pl')
                 if isinf(r_cap)
-                    % CORRECTED: Binds unconfined liquid pressure boundaries 
+                    % CORRECTED: Binds unconfined liquid pressure boundaries
                     % to prevent unphysical out-of-bounds parameter execution drift
                     u_proj(n+2) = min(max(u_proj(n+2), lnPV_min), lnPV_max);
                 else
