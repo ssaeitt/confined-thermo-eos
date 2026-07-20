@@ -89,7 +89,7 @@ classdef FlashEngine < handle
             if strcmpi(capMode, 'pl')
                 lnPmech0 = log(max(PL_init, 1e5));
             else
-                lnPmech0 = log(max(Pcap_init, 10.0)); % Clamp minimum Pc seed to 10 Pa
+                lnPmech0 = log(max(Pcap_init, 10.0)); 
             end
 
             u0 = [lnK0; lnPV0; lnPmech0];
@@ -148,6 +148,14 @@ classdef FlashEngine < handle
 
                 step = -J \ res;
 
+                % --- CRITICAL STEP-CLIPPING safeguard rail ---
+                % Restricts the step velocity in log-space to prevent the solver 
+                % from overshooting and falling into inverted/bubble point basins.
+                max_step = 0.2;
+                if max(abs(step)) > max_step
+                    step = step * (max_step / max(abs(step)));
+                end
+
                 % Armijo Backtracking Line Search
                 alpha = 1.0;
                 u_new = obj.projectFeasibleDomain(u + alpha * step, mode, r_cap, lnPV_min, lnPV_max);
@@ -195,6 +203,12 @@ classdef FlashEngine < handle
 
                 step = -B \ res;
 
+                % --- CRITICAL STEP-CLIPPING safeguard rail ---
+                max_step = 0.2;
+                if max(abs(step)) > max_step
+                    step = step * (max_step / max(abs(step)));
+                end
+                
                 % Line search
                 alpha = 1.0;
                 u_new = obj.projectFeasibleDomain(u + alpha * step, mode, r_cap, lnPV_min, lnPV_max);
