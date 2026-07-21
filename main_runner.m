@@ -132,6 +132,7 @@ eps_fluid_molar = fluid.LJ_Energy(:) * NA;
 eps_rock_molar  = rock.EnergyVector(:);
 w_norm          = rock.WeightVector(:);
 w_TOC           = max(rock.w_TOC, 1e-4); % Guard against division-by-zero if TOC is 0
+rawTOC          = max(rock.RawTOC, 1e-4);
 
 % 3. Compute Composite Molar Fluid-Wall Energy per Component
 eps_wall_comp = zeros(nc, 1);
@@ -149,7 +150,7 @@ for r = 1:nc
                  sqrt(eps_wall_comp(r) * eps_wall_comp(c));
         
         % Inverse-Disparity empirical correlation
-        val_corr = A_corr * E_star + (B_corr * E_star) / w_TOC + C_corr;
+        val_corr = A_corr * E_star + (B_corr * E_star) / rawTOC + C_corr;
         
         kijc_matrix(r, c) = val_corr;
         kijc_matrix(c, r) = val_corr;

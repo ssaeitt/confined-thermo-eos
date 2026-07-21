@@ -6,14 +6,17 @@ classdef RockProperties
     properties (SetAccess = private)
         RockName (1,1) string          % Name identifier of target sample (e.g., "B1", "EF2")
         Theta (1,1) double {mustBeReal, mustBeNonnegative} % Macroscopic contact angle [degrees]
-        
+
+        % Unnormalized Raw TOC Mass Fraction (Preserved specifically for empirical TIP correlations)
+        RawTOC (1,1) double {mustBeReal, mustBeNonnegative}
+
         % Normalized Mineral Group Mass Fractions (Sum = 1.0)
         w_Silicates (1,1) double {mustBeReal, mustBeNonnegative}
         w_Carbonates (1,1) double {mustBeReal, mustBeNonnegative}
         w_Clays (1,1) double {mustBeReal, mustBeNonnegative}
         w_Others (1,1) double {mustBeReal, mustBeNonnegative}
         w_TOC (1,1) double {mustBeReal, mustBeNonnegative}
-        
+
         % Composite Group Surface Energy Parameters [J/mol or K-based basis]
         E_Silicates (1,1) double {mustBeReal, mustBeNonnegative}
         E_Carbonates (1,1) double {mustBeReal, mustBeNonnegative}
@@ -37,6 +40,12 @@ classdef RockProperties
             if nargin > 0
                 obj.RockName = string(name);
                 obj.Theta = theta;
+
+                if nargin > 4
+                    obj.RawTOC = rawTOC;
+                else
+                    obj.RawTOC = weights(5); % Fallback default if raw fraction is omitted
+                end
                 
                 % Unpack group configuration arrays
                 obj.w_Silicates  = weights(1);
@@ -144,6 +153,7 @@ classdef RockProperties
             
             normalizedWeights = [w_Sil_raw, w_Car_raw, w_Clay_raw, w_Oth_raw, w_TOC_raw] ./ sumRawWeights;
 
+            % Apply unit conversion (Kelvin -> J/mol) by scaling with Gas Constant R
             R_val = entities.RockProperties.R;
             groupEnergies     = [E_Sil, E_Car, E_Clay, E_Oth, E_TOC] * R_val;
             
