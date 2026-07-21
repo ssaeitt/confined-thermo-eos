@@ -35,7 +35,7 @@ classdef RockProperties
     end
     
     methods
-        function obj = RockProperties(name, theta, weights, energies)
+        function obj = RockProperties(name, theta, weights, energies, rawTOC)
             % Constructor enforcing core property instantiation and validation
             if nargin > 0
                 obj.RockName = string(name);
@@ -158,7 +158,7 @@ classdef RockProperties
             groupEnergies     = [E_Sil, E_Car, E_Clay, E_Oth, E_TOC] * R_val;
             
             % Return configured and normalized class instance
-            obj = entities.RockProperties(targetRockName, thetaVal, normalizedWeights, groupEnergies);
+            obj = entities.RockProperties(targetRockName, thetaVal, normalizedWeights, groupEnergies, w_TOC_raw);
         end
         
         function E_avg = calculateWeightedEnergy(weights, energies)
