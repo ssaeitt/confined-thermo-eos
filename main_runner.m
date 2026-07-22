@@ -179,12 +179,8 @@ fprintf('\nExecuting Stage 1: Solving Unconfined Bulk Saturation Boundary...\n')
 
 if bulk_stats.converged
     fprintf('      -> Bulk Stage Converged at %.4f MPa (%.2f psia)\n', P_bulk/1e6, P_bulk/6894.757);
-    K_seed = K_bulk;
-    P_start = P_bulk;
 else
-    fprintf('      -> Bulk Stage Stalled. Falling back to empirical seeds.\n');
-    K_seed = [];
-    P_start = P_guess_Pa;
+    fprintf('      -> Bulk Stage Stalled.\n');
 end
 
 % --- STAGE 2: NON-ISOBARIC CONFINED STEADY SWEEP ---
@@ -192,12 +188,13 @@ if isinf(r_cap)
     % System is open-channel bulk; bypass second evaluation stage
     Pdew_Pa = P_bulk; K_factors = K_bulk; Pcap_Pa = 0.0; Pliq_Pa = P_bulk; stats = bulk_stats;
 else
-    fprintf('\nExecuting Stage 2: Tracing Confined Boundary at r_cap = %.2f nm...\n', r_nm);
-    % CORRECTED: Re-inject K_bulk to anchor the solver to the upper retrograde branch
+    fprintf('\nExecuting Stage 2: Tracing Confined Boundary at r_cap = %.2f nm via Confined TPD Seeding...\n', r_nm);
+    % Omit K_seed (set to []) to force FlashEngine to execute the confined StabilityTester
+    % at P_guess_Pa, replicating the exact legacy initialization pipeline.
     [Pdew_Pa, K_factors, Pcap_Pa, Pliq_Pa, stats] = flash.solveDewPoint(...
-        T_K, P_start, z_feed, r_cap, ...
+        T_K, P_guess_Pa, z_feed, r_cap, ...
         'Solver', 'newton', 'CapMode', 'Pc', ...
-        'K_seed', K_bulk, 'Pcap_seed', 1e4);
+        'K_seed', [], 'Pcap_seed', []);
 end
 
 execTime = toc;

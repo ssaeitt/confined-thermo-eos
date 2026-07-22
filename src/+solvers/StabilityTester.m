@@ -38,15 +38,15 @@ classdef StabilityTester < handle
             Pc_vec = obj.EOS.Fluid.Pc(:);
             Tc_vec = obj.EOS.Fluid.Tc(:);
             om_vec = obj.EOS.Fluid.omega(:);
-            
+
             K0 = (Pc_vec ./ PV) .* exp(5.37 .* (1 + om_vec) .* (1 - Tc_vec ./ T));
             x0 = obj.projectSimplex(z ./ K0); % Liquid-like seed
-            
+
             % Baseline Vapor State Evaluation at PV
-            [lnphiV, ZV, ~, ~] = obj.EOS.calculateState(PV, T, z, 1, r_cap);
-            
+            [lnphiV, ZV, ~, ~] = obj.EOS.calculateState(PV, T, z, -1, r_cap);
+
             % Initialize Liquid Pressure & Capillary Seeding
-            [~, ZL0, ~, ~] = obj.EOS.calculateState(PV, T, x0, -1, r_cap);
+            [~, ZL0, ~, ~] = obj.EOS.calculateState(PV, T, x0, 1, r_cap);
             [rho_l0, rho_v0] = obj.calculatePhaseDensities(ZL0, ZV, PV, PV, T);
             
             Pc_seed = obj.evaluateCapillaryPressure(x0, z, rho_l0, rho_v0, r_cap);
@@ -155,9 +155,7 @@ classdef StabilityTester < handle
             rho_v_cgs = rho_v / 1e6;
             
             ift_param = sum(Pch .* (x .* rho_l_cgs - y .* rho_v_cgs));
-            ift_param = max(ift_param, 0.0);
-            
-            sigma_mN_m = ift_param^4;       % IFT in mN/m
+            sigma_mN_m = max(ift_param, 0.0)^4;
             sigma_N_m  = sigma_mN_m / 1000; % Convert to N/m
             
             theta_rad = deg2rad(obj.EOS.Rock.Theta);
