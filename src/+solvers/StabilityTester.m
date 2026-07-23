@@ -1,8 +1,9 @@
 classdef StabilityTester < handle
-    % STABILITYTESTER Non-isobaric Tangent Plane Distance (TPD) stability engine.
+    % STABILITYTESTER Non-isobaric & Isobaric Tangent Plane Distance (TPD) stability engine.
     % Evaluates phase stability under nanoporous confinement by coupling projected
-    % gradient descent on the probability simplex with lagged capillary pressure updates.
-    
+    % gradient descent on the probability simplex with optional lagged capillary pressure updates.
+    % Supports both Combined (FWI + Pcap) and FWI-Only (Pcap = 0) physics modes.
+
     properties (SetAccess = private)
         EOS thermo.ConfinedEOS  % Handle to active thermodynamic operator
         MaxIterations (1,1) double {mustBeInteger, mustBePositive} = 500
@@ -25,16 +26,28 @@ classdef StabilityTester < handle
             end
         end
         
-        function [isUnstable, w_star, tpd_min, K_factors, PV, PL, Pc] = evaluateDewStability(obj, Pext, T, z, r_cap)
+        function [isUnstable, w_star, tpd_min, K_factors, PV, PL, Pc] = evaluateDewStability(obj, Pext, T, z, r_cap, varargin)
             % Main entry point evaluating vapor-phase (dew) stability under confinement.
             % Returns isUnstable = true if TPD < 0, indicating a phase split lowers system Gibbs energy.
+            % Optional Key-Value input:
+            %   'CapMode': 'Pc' (Combined Model) or 'PL' / 'NoCap' (FWI-Only Model)
             
             z = reshape(z, [], 1);
             z = max(z, 1e-20);
             z = z / sum(z);
             PV = Pext;
             
-            % Wilson K-factor Seeding
+            % Parse Mode Controls
+            capMode = 'Pc'; % Default to Combined Model
+            for idx = 1:2:length(varargin)
+                if strcmpi(string(varargin{idx}), "CapMode")
+                    capMode = varargin{idx+1};
+                end
+            end
+            
+            isCapActive = ~strcmpi(capMode, 'PL') && ~strcmpi(capMode, 'NoCap') && ~isinf(r_cap);
+
+            % 1. Wilson K-factor Seeding
             Pc_vec = obj.EOS.Fluid.Pc(:);
             Tc_vec = obj.EOS.Fluid.Tc(:);
             om_vec = obj.EOS.Fluid.omega(:);
@@ -42,20 +55,24 @@ classdef StabilityTester < handle
             K0 = (Pc_vec ./ PV) .* exp(5.37 .* (1 + om_vec) .* (1 - Tc_vec ./ T));
             x0 = obj.projectSimplex(z ./ K0); % Liquid-like seed
 
-            % Baseline Vapor State Evaluation at PV
+            % 2. Baseline Vapor State Evaluation at PV
             [lnphiV, ZV, ~, ~] = obj.EOS.calculateState(PV, T, z, -1, r_cap);
 
-            % Initialize Liquid Pressure & Capillary Seeding
-            [~, ZL0, ~, ~] = obj.EOS.calculateState(PV, T, x0, 1, r_cap);
-            [rho_l0, rho_v0] = obj.calculatePhaseDensities(ZL0, ZV, PV, PV, T);
+            % 3. Initialize Liquid Pressure & Capillary Seeding (+1 = Liquid)
+            if isCapActive
+                [~, ZL0, ~, ~] = obj.EOS.calculateState(PV, T, x0, 1, r_cap);
+                [rho_l0, rho_v0] = obj.calculatePhaseDensities(ZL0, ZV, PV, PV, T);
+                Pc_seed = obj.evaluateCapillaryPressure(x0, z, rho_l0, rho_v0, r_cap);
+                PL0 = max(PV - Pc_seed, 1e3);
+            else
+                PL0 = PV;
+                Pc_seed = 0.0;
+            end
             
-            Pc_seed = obj.evaluateCapillaryPressure(x0, z, rho_l0, rho_v0, r_cap);
-            PL0 = max(PV - Pc_seed, 1e3); % Guard positivity
+            % 4. Execute Projected Gradient Minimization
+            [w_star, tpd_min, PL, Pc] = obj.minimizeTPD(x0, z, T, PV, PL0, lnphiV, ZV, r_cap, isCapActive);
             
-            % Execute Projected Gradient Minimization with Lagged Pressure Coupling
-            [w_star, tpd_min, PL, Pc] = obj.minimizeTPD(x0, z, T, PV, PL0, lnphiV, ZV, r_cap);
-            
-            % Evaluate Stability Criteria & Assign Output Vectors
+            % 5. Evaluate Stability Criteria & Assign Output Vectors
             isUnstable = (tpd_min < -1e-7);
             
             if isUnstable
@@ -70,56 +87,64 @@ classdef StabilityTester < handle
     end
     
     methods (Access = private)
-        function [w, tpd_min, PL, Pc] = minimizeTPD(obj, w0, z, T, PV, PL0, lnphiV, ZV, r_cap)
-            % Core projected gradient descent engine with simplex projection
+        function [w, tpd_min, PL, Pc] = minimizeTPD(obj, w0, z, T, PV, PL0, lnphiV, ZV, r_cap, isCapActive)
+            % Projected gradient descent engine supporting both isobaric (FWI-Only) 
+            % and non-isobaric (Combined) TPD minimization.
+
             w  = obj.projectSimplex(w0);
             PL = PL0;
             Pc = max(PV - PL0, 0);
             nc = obj.EOS.Fluid.NC;
-            
+            tpd_old = 1e10;
+
             for it = 1:obj.MaxIterations
                 % 1) Evaluate trial liquid state at current PL
                 [lnphiL, ZL, ~, ~] = obj.EOS.calculateState(PL, T, w, 1, r_cap);
                 
-                % 2) Update densities and macroscopic capillary discontinuity
-                [rho_l, rho_v] = obj.calculatePhaseDensities(ZL, ZV, PL, PV, T);
+                % 2) Calculate current TPD Value
+                tpd_val = obj.calculateTPDValue(w, z, lnphiL, lnphiV, PL, PV, isCapActive);
                 
-                % Trivial root protection: check similarity to feed composition
-                if norm(w - z) < 1e-4
-                    Pc_new = 0.0;
-                else
-                    Pc_new = obj.evaluateCapillaryPressure(w, z, rho_l, rho_v, r_cap);
+                % Check convergence on functional change (from FWI-Only legacy logic)
+                if abs(tpd_val - tpd_old) < obj.StepTolerance && it > 1
+                    break;
                 end
+                tpd_old = tpd_val;
                 
-                if isnan(Pc_new) || Pc_new < 0, Pc_new = 0.0; end
-                
-                % Under-relaxed successive substitution updates for pressure gap
-                if isfinite(Pc_new) && Pc_new >= 0
+                % 3) Update capillary pressure and PL if capillary mode is active
+                if isCapActive
+                    [rho_l, rho_v] = obj.calculatePhaseDensities(ZL, ZV, PL, PV, T);
+                    
+                    if norm(w - z) < 1e-4
+                        Pc_new = 0.0;
+                    else
+                        Pc_new = obj.evaluateCapillaryPressure(w, z, rho_l, rho_v, r_cap);
+                    end
+                    
+                    if isnan(Pc_new) || Pc_new < 0, Pc_new = 0.0; end
                     Pc = (1 - obj.RelaxPL) * Pc + obj.RelaxPL * Pc_new;
+                    
+                    PL_new = max(PV - Pc, 1e3);
+                    PL = (1 - obj.RelaxPL) * PL + obj.RelaxPL * PL_new;
+                else
+                    PL = PV;
+                    Pc = 0.0;
                 end
                 
-                PL_new = max(PV - Pc, 1e3);
-                if ~isfinite(PL_new), PL_new = 1e3; end
-                PL = (1 - obj.RelaxPL) * PL + obj.RelaxPL * PL_new;
-                
-                % 3) Evaluate Central Finite-Difference Gradients
+                % 4) Evaluate Finite-Difference Gradients
                 grad = zeros(nc, 1);
                 for i = 1:nc
                     e_vec = zeros(nc, 1); e_vec(i) = 1.0;
-                    
                     wf = obj.projectSimplex(w + obj.Delta * e_vec);
                     wb = obj.projectSimplex(w - obj.Delta * e_vec);
                     
                     [lnphiL_f, ~, ~, ~] = obj.EOS.calculateState(PL, T, wf, 1, r_cap);
                     [lnphiL_b, ~, ~, ~] = obj.EOS.calculateState(PL, T, wb, 1, r_cap);
                     
-                    tf = obj.calculateTPDValue(wf, z, lnphiL_f, lnphiV, PL, PV);
-                    tb = obj.calculateTPDValue(wb, z, lnphiL_b, lnphiV, PL, PV);
-                    
+                    tf = obj.calculateTPDValue(wf, z, lnphiL_f, lnphiV, PL, PV, isCapActive);
+                    tb = obj.calculateTPDValue(wb, z, lnphiL_b, lnphiV, PL, PV, isCapActive);
                     grad(i) = (tf - tb) / (2 * obj.Delta);
                 end
                 
-                % 4) Check Gradient Norm Convergence
                 if norm(grad) < obj.GradTolerance
                     break;
                 end
@@ -133,17 +158,22 @@ classdef StabilityTester < handle
                 w = w_new;
             end
             
-            % Final evaluation at the stationary minimiser
+            % Final TPD evaluation at stationary point
             [lnphiL, ~, ~, ~] = obj.EOS.calculateState(PL, T, w, 1, r_cap);
-            tpd_min = obj.calculateTPDValue(w, z, lnphiL, lnphiV, PL, PV);
+            tpd_min = obj.calculateTPDValue(w, z, lnphiL, lnphiV, PL, PV, isCapActive);
         end
         
-        function tpd_val = calculateTPDValue(~, w, z, lnphiL, lnphiV, PL, PV)
-            % Evaluates non-isobaric TPD including the mechanical pressure offset
+        function tpd_val = calculateTPDValue(~, w, z, lnphiL, lnphiV, PL, PV, isCapActive)
             eps_val = 1e-12;
             chem_term = sum(w .* (log((w + eps_val) ./ z) + lnphiL - lnphiV));
-            mech_term = log(max(PL, eps_val) / max(PV, eps_val));
-            tpd_val   = chem_term + mech_term;
+            
+            if isCapActive
+                mech_term = log(max(PL, eps_val) / max(PV, eps_val));
+            else
+                mech_term = 0.0; % FWI-Only Mode has no mechanical pressure jump
+            end
+            
+            tpd_val = chem_term + mech_term;
         end
         
         function Pc = evaluateCapillaryPressure(obj, x, y, rho_l, rho_v, r_cap)
@@ -189,13 +219,13 @@ classdef StabilityTester < handle
         function parseNumericalOverrides(obj, varargin)
             % Allows overriding optimization tolerances during class construction
             for idx = 1:2:length(varargin)
-                switch string(varargin{idx})
-                    case "MaxIterations", obj.MaxIterations = varargin{idx+1};
-                    case "GradTolerance", obj.GradTolerance = varargin{idx+1};
-                    case "StepTolerance", obj.StepTolerance = varargin{idx+1};
-                    case "Alpha",         obj.Alpha         = varargin{idx+1};
-                    case "Delta",         obj.Delta         = varargin{idx+1};
-                    case "RelaxPL",       obj.RelaxPL       = varargin{idx+1};
+                switch lower(string(varargin{idx}))
+                    case "maxiterations", obj.MaxIterations = varargin{idx+1};
+                    case "gradtolerance", obj.GradTolerance = varargin{idx+1};
+                    case "steptolerance", obj.StepTolerance = varargin{idx+1};
+                    case "alpha",         obj.Alpha         = varargin{idx+1};
+                    case "delta",         obj.Delta         = varargin{idx+1};
+                    case "relaxpl",       obj.RelaxPL       = varargin{idx+1};
                 end
             end
         end
