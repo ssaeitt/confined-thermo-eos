@@ -1,6 +1,7 @@
 % =========================================================================
 % CONFINED THERMODYNAMIC EOS MODELING: INTERACTIVE PDEW DRIVER
 % Object-Oriented framework for VLE under nanoporous confinement
+% Supports both Combined (FWI + Pcap) and FWI-Only (Pcap = 0) physics modes
 % =========================================================================
 clc; clear; close all;
 format shortG;
@@ -25,6 +26,20 @@ fprintf('   NANOPOROUS CONFINEMENT PDEW PREDICTION ENGINE (OOP V1.1)        \n')
 fprintf('===================================================================\n\n');
 
 %% 2. INTERACTIVE RESEARCH PARAMETER & MIXTURE CONFIGURATION
+
+% --- Model Confinement Physics Selection ---
+fprintf('Select Confinement Physics Mode:\n');
+fprintf('  1. Combined Model (Fluid-Wall Interaction + Pcap)\n');
+fprintf('  2. FWI-Only Model (Fluid-Wall Interaction Only, Pcap = 0)\n');
+modeChoice = input('Enter physics mode index (1-2): ');
+if isempty(modeChoice) || ~ismember(modeChoice, [1, 2]), modeChoice = 1; end
+
+if modeChoice == 1
+    modelMode = 'Combined';
+else
+    modelMode = 'FWI-Only';
+end
+fprintf('Selected Physics Mode: [%s]\n\n', modelMode);
 
 % --- Geological Formation Selection ---
 fprintf('Select Target Geological Formation:\n');
@@ -94,13 +109,10 @@ end
 
 if compChoice <= nRows
     rawStr = string(validRows.("mole_frac")(compChoice));
-    % Strip brackets if necessary and evaluate numerical array safely
     cleanStr = strrep(strrep(rawStr, "[", ""), "]", "");
     z_feed = str2double(strsplit(cleanStr, ","));
     z_feed = z_feed(:) / sum(z_feed); % Enforce strict column orientation and normalization
     
-    exp_Pdew_lower = validRows.("Pdew_Exp_lower")(compChoice);
-    exp_Pdew_upper = validRows.("Pdew_Exp_upper")(compChoice);
     fprintf('      -> Selected Dataset Feed: z = [%s]\n', num2str(z_feed'));
 else
     % Prompt user for custom vector
@@ -111,7 +123,6 @@ else
         error('InputError:InvalidComposition', 'Custom vector must contain exactly %d elements.', fluid.NC);
     end
     z_feed = z_custom(:)' / sum(z_custom); % Enforce normalization
-    exp_Pdew_lower = NaN; exp_Pdew_upper = NaN;
     fprintf('      -> Applied Custom Feed: z = [%s]\n', num2str(z_feed));
 end
 z_feed = z_feed(:); % Enforce column vector for matrix operations
@@ -119,10 +130,21 @@ z_feed = z_feed(:); % Enforce column vector for matrix operations
 %% 4. EXPLICIT TIP MATRIX (kijc) VIA INVERSE-DISPARITY CORRELATION
 fprintf('[2/4] Computing Ternary Interaction Parameter (TIP) matrix...\n');
 
+% Common EOS FWI Tuners
+k_val       = 64.4376;
+pT_wall_val = 1.3745;
+lambda_val  = 10.0338;
+
 % 1. Define Correlation Fitting Coefficients (Inverse-Disparity Model)
-A_corr = 90.5402886251168;
-B_corr = 1.09588610509636;
-C_corr = -150.825648642323;
+if strcmpi(modelMode, 'FWI-Only')
+    A_corr =  101.415477921051;
+    B_corr =    1.23381011476174;
+    C_corr = -168.946183223101;
+else % Combined Mode
+    A_corr =   90.5402886251168;
+    B_corr =    1.09588610509636;
+    C_corr = -150.825648642323;
+end
 
 nc = fluid.NC;
 NA = 6.02214076e23; % Avogadro's Constant [1/mol]
@@ -176,7 +198,7 @@ tic;
 fprintf('\nExecuting Stage 1: Solving Unconfined Bulk Saturation Boundary...\n');
 [P_bulk, K_bulk, ~, ~, bulk_stats] = flash.solveDewPoint(...
     T_K, P_guess_Pa, z_feed, Inf, 'Solver', 'newton');
-
+   
 if bulk_stats.converged
     fprintf('      -> Bulk Stage Converged at %.4f MPa (%.2f psia)\n', P_bulk/1e6, P_bulk/6894.757);
 else
@@ -185,15 +207,19 @@ end
 
 % --- STAGE 2: NON-ISOBARIC CONFINED STEADY SWEEP ---
 if isinf(r_cap)
-    % System is open-channel bulk; bypass second evaluation stage
     Pdew_Pa = P_bulk; K_factors = K_bulk; Pcap_Pa = 0.0; Pliq_Pa = P_bulk; stats = bulk_stats;
 else
-    fprintf('\nExecuting Stage 2: Tracing Confined Boundary at r_cap = %.2f nm via Confined TPD Seeding...\n', r_nm);
-    % Omit K_seed (set to []) to force FlashEngine to execute the confined StabilityTester
-    % at P_guess_Pa, replicating the exact legacy initialization pipeline.
+    fprintf('\nExecuting Stage 2: Tracing Confined Boundary at r_cap = %.2f nm [%s]...\n', r_nm, modelMode);
+    
+    if strcmpi(modelMode, 'FWI-Only')
+        capModeSetting = 'PL'; % Enforces P_l = P_v, setting Pcap = 0
+    else
+        capModeSetting = 'Pc'; % Full capillary pressure calculation
+    end
+    
     [Pdew_Pa, K_factors, Pcap_Pa, Pliq_Pa, stats] = flash.solveDewPoint(...
         T_K, P_guess_Pa, z_feed, r_cap, ...
-        'Solver', 'newton', 'CapMode', 'Pc', ...
+        'Solver', 'newton', 'CapMode', capModeSetting, ...
         'K_seed', [], 'Pcap_seed', []);
 end
 
@@ -208,14 +234,15 @@ Pliq_MPa = Pliq_Pa / 1e6;   Pliq_psi = Pliq_Pa / psi2Pa;
 fprintf('\n===================================================================\n');
 fprintf('                 CONVERGED EQUILIBRIUM STATE REPORT                \n');
 fprintf('===================================================================\n');
+fprintf(' Physics Mode      : %s\n', modelMode);
 fprintf(' Solver Status      : %s (Completed in %.3f seconds)\n', upper(string(stats.converged)), execTime);
 fprintf(' Total Iterations   : %d\n', stats.iterations);
 fprintf(' Final Residual Norm: %.2e\n', stats.residual_norm);
 fprintf('-------------------------------------------------------------------\n');
 fprintf(' Macroscopic Phase Pressures:\n');
 fprintf('   -> Vapor Dew Pressure (P_dew) : %8.4f MPa  (%9.2f psia)\n', Pdew_MPa, Pdew_psi);
-fprintf('   -> Liquid Phase Pressure (P_l): %8.4f MPa  (%9.2f psia)\n', Pliq_MPa, Pliq_Pa / psi2Pa);
-fprintf('   -> Capillary Discontinuity(Pc): %8.4f MPa  (%9.2f psi)\n', Pcap_MPa, Pcap_Pa / psi2Pa);
+fprintf('   -> Liquid Phase Pressure (P_l): %8.4f MPa  (%9.2f psia)\n', Pliq_MPa, Pliq_psi);
+fprintf('   -> Capillary Discontinuity(Pc): %8.4f MPa  (%9.2f psi)\n', Pcap_MPa, Pcap_psi);
 fprintf('-------------------------------------------------------------------\n');
 fprintf(' Component Equilibrium Split Factors (K_i = y_i / x_i):\n');
 for i = 1:nc
