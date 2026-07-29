@@ -50,15 +50,18 @@ rockMap = {'EF2', 'B1'};
 if isempty(rockChoice) || ~ismember(rockChoice, [1, 2]), rockChoice = 1; end
 selectedRock = rockMap{rockChoice};
 
-% --- Hydrocarbon Mixture System Selection ---
-fprintf('\nSelect Hydrocarbon Mixture System:\n');
-fprintf('  1. C1-nC5  (Methane / n-Pentane)\n');
-fprintf('  2. C1-nC8  (Methane / n-Octane)\n');
-fprintf('  3. C1-nC10 (Methane / n-Decane)\n');
+% --- Hydrocarbon & CO2 Mixture System Selection ---
+fprintf('\nSelect Gas Mixture System:\n');
+fprintf('  1. C1-nC5      (Methane / n-Pentane)\n');
+fprintf('  2. C1-nC8      (Methane / n-Octane)\n');
+fprintf('  3. C1-nC10     (Methane / n-Decane)\n');
 fprintf('  4. C1-nC5-nC10 (Ternary System)\n');
-mixChoice = input('Enter mixture index (1-4): ');
-mixMap = {'C1-nC5', 'C1-nC8', 'C1-nC10', 'C1-nC5-nC10'};
-if isempty(mixChoice) || ~ismember(mixChoice, 1:4), mixChoice = 1; end
+fprintf('  5. CO2-C1-nC8  (Carbon Dioxide / Methane / n-Octane) 20C\n');
+fprintf('  6. CO2-C1-nC5  (Carbon Dioxide / Methane / n-Pentane) 37.8C\n');
+
+mixChoice = input('Enter mixture index (1-6): ');
+mixMap = {'C1-nC5', 'C1-nC8', 'C1-nC10', 'C1-nC5-nC10', 'CO2-C1-nC8', 'CO2-C1-nC5'};
+if isempty(mixChoice) || ~ismember(mixChoice, 1:6), mixChoice = 5; end
 selectedMixName = mixMap{mixChoice};
 
 % --- Thermodynamic State & Confinement Boundaries ---
