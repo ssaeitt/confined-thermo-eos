@@ -16,6 +16,8 @@ classdef DewPointDataset
         BulkPdew_psi   (:,1) double = zeros(0,1)
         ConfLower_psi  (:,1) double = zeros(0,1)   % NaN if not measured
         ConfUpper_psi  (:,1) double = zeros(0,1)
+        PoreRadius_nm  (:,1) double = zeros(0,1)   % optional column; NaN if absent
+        Campaign       (:,1) string = string.empty(0,1)   % optional column; "" if absent
     end
 
     properties (Dependent)
@@ -28,8 +30,12 @@ classdef DewPointDataset
     end
 
     methods
-        function obj = DewPointDataset(mix, z, rock, T, bulk, lo, up)
+        function obj = DewPointDataset(mix, z, rock, T, bulk, lo, up, rp_nm, campaign)
             if nargin == 0, return; end
+            if nargin < 8 || isempty(rp_nm),    rp_nm = nan(numel(mix), 1); end
+            if nargin < 9 || isempty(campaign), campaign = strings(numel(mix), 1); end
+            obj.PoreRadius_nm = rp_nm(:);
+            obj.Campaign = string(campaign(:));
             obj.Mixture = string(mix(:));
             obj.MoleFrac = z(:);
             obj.Rock = string(rock(:));
@@ -71,7 +77,9 @@ classdef DewPointDataset
                 'PdewBulk',  obj.BulkPdew_psi(i) * p, ...
                 'PdewConfMid', obj.ConfMid_psi(i) * p, ...
                 'PdewConfHalfWidth', obj.ConfHalfWidth_psi(i) * p, ...
-                'HasConfined', obj.HasConfined(i));
+                'HasConfined', obj.HasConfined(i), ...
+                'PoreRadius_m', obj.PoreRadius_nm(i) * 1e-9, ...   % NaN when the sheet has no column
+                'Campaign',   obj.Campaign(i));
         end
 
         function idx = findCases(obj, mixture, rock, z)
@@ -87,8 +95,9 @@ classdef DewPointDataset
         function Tb = toTable(obj)
             zs = cellfun(@(v) "[" + strjoin(string(v.'), ",") + "]", obj.MoleFrac);
             Tb = table(obj.Mixture, zs, obj.Rock, obj.T, obj.BulkPdew_psi, ...
-                obj.ConfLower_psi, obj.ConfUpper_psi, ...
-                'VariableNames', {'Mixture','z','Rock','T_K','Bulk_psi','ConfLo_psi','ConfUp_psi'});
+                obj.ConfLower_psi, obj.ConfUpper_psi, obj.PoreRadius_nm, obj.Campaign, ...
+                'VariableNames', {'Mixture','z','Rock','T_K','Bulk_psi','ConfLo_psi','ConfUp_psi', ...
+                'rp_nm','Campaign'});
         end
     end
 
@@ -126,10 +135,18 @@ classdef DewPointDataset
                 T = repmat(opts.DefaultT, numel(mix), 1);
             end
 
+            % Optional columns: pore radius [nm] and campaign/batch label
+            rp = nan(numel(mix), 1);
+            rpCol = vn(ismember(lower(vn), ["r_p_nm", "rp_nm", "pore_radius_nm", "rp"]));
+            if ~isempty(rpCol), rp = entities.DewPointDataset.num(Tb.(rpCol(1))); end
+            camp = strings(numel(mix), 1);
+            cCol = vn(ismember(lower(vn), ["campaign", "batch", "note"]));
+            if ~isempty(cCol), camp = strtrim(string(Tb.(cCol(1)))); end
+
             obj = entities.DewPointDataset(mix, z, strtrim(string(Tb.("Rock"))), T, ...
                 entities.DewPointDataset.num(Tb.("Bulk_Pdew")), ...
                 entities.DewPointDataset.num(Tb.("Pdew_Exp_lower")), ...
-                entities.DewPointDataset.num(Tb.("Pdew_Exp_upper")));
+                entities.DewPointDataset.num(Tb.("Pdew_Exp_upper")), rp, camp);
         end
     end
 
