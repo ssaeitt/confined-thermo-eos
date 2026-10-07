@@ -1,419 +1,553 @@
 classdef FlashEngine < handle
-    % FLASHENGINE Multi-variable non-isobaric & isobaric VLE flash calculation engine.
-    % Traces dew-point phase boundaries under nanoporous confinement using
-    % hybrid Newton-Raphson and Broyden Quasi-Newton solvers with Armijo
-    % backtracking line search and Euclidean domain projections.
-    % Supports both Combined (NC+2) and FWI-Only (NC+1) system formulations.
+    % FLASHENGINE Dew-point solver for confined mixtures (incipient-liquid
+    % formulation), isobaric (FWI-only) or non-isobaric (Combined: FWI + Pcap).
+    %
+    % Unknowns   u = [ln K (nc); ln P_V; ln Pcap (Combined only)]
+    % Residuals  F_i    = ln K_i - [ln phi_i^L(x, P_L) + ln P_L - ln phi_i^V(z, P_V) - ln P_V]
+    %            F_nc+1 = sum_i z_i / K_i - 1
+    %            F_nc+2 = Pcap_YL(x, z, V_L, V_V) / Pcap - 1           (Combined)
+    % with x = (z./K) / sum(z./K), P_L = P_V - Pcap.
+    %
+    % Solvers: successive substitution (standalone or pre-conditioner),
+    % Newton-Raphson and Broyden (good update on J), both globalised with an
+    % Armijo backtracking line search on 0.5*||F||^2.
+    %
+    % Root selection: forced (+1 liquid, -1 vapor) roots, as required by the
+    % incipient-phase formulation to keep the phases distinct. Trivial and
+    % coalesced-root states are rejected, never deflected.
+
+    properties (Constant)
+        psi2Pa = 6894.757
+    end
 
     properties (SetAccess = private)
-        EOS thermo.ConfinedEOS         % Handle to active thermodynamic operator
-        Stability solvers.StabilityTester % Handle to stability analysis engine
+        EOS       thermo.ConfinedEOS
+        Stability solvers.StabilityTester
 
-        % Numerical Solver Configuration Controls
-        MaxIterations (1,1) double {mustBeInteger, mustBePositive} = 1000
-        Tolerance (1,1) double {mustBePositive, mustBeReal} = 1e-8
-        JacEpsilon (1,1) double {mustBePositive, mustBeReal} = 1e-6
-        LineSearchC1 (1,1) double {mustBePositive, mustBeReal} = 1e-4
-        MaxLineSearch (1,1) double {mustBeInteger, mustBePositive} = 10
-        JacRegularizer (1,1) double {mustBePositive, mustBeReal} = 1e-8
-        MaxStepSize (1,1) double {mustBePositive, mustBeReal} = 0.2
+        % Newton / Broyden
+        MaxIterations   (1,1) double {mustBeInteger, mustBePositive} = 200
+        Tolerance       (1,1) double {mustBePositive} = 1e-8     % ||F||_inf
+        JacEpsilon      (1,1) double {mustBePositive} = 1e-6
+        LineSearchC1    (1,1) double {mustBePositive} = 1e-4
+        MaxLineSearch   (1,1) double {mustBeInteger, mustBePositive} = 14
+        JacRegularizer  (1,1) double {mustBePositive} = 1e-10    % LM damping when J is ill-conditioned
+        MaxStepSizeK    (1,1) double {mustBePositive} = 0.20     % max |d ln K|
+        MaxStepSizeP    (1,1) double {mustBePositive} = 0.05     % max |d ln P_V|
+        MaxStepSizePcap (1,1) double {mustBePositive} = 0.50     % max |d ln Pcap|
+
+        % Successive substitution
+        PreconditionWithSS (1,1) logical = true
+        SSMaxIterations    (1,1) double {mustBeInteger, mustBePositive} = 35
+        SSTolerance        (1,1) double {mustBePositive} = 1e-5
+        SSDamping          (1,1) double {mustBeInRange(SSDamping, 0, 1, "exclude-lower")} = 0.70
+        SSMaxStepP         (1,1) double {mustBePositive} = log(1.1)
+        DewBranch          (1,1) string {mustBeMember(DewBranch, ["upper","lower"])} = "upper"
+
+        % Physical guards
+        TrivialTol      (1,1) double {mustBePositive} = 0.01     % ||ln K||_2 below which a state is trivial
+        SeedMinLnK      (1,1) double {mustBePositive} = 0.05     % minimum ||ln K||_2 to accept a TPD seed
+        CoalescenceTol  (1,1) double {mustBePositive} = 1e-5     % |Z_V - Z_L|
+        BackoffFactor   (1,1) double {mustBeInRange(BackoffFactor, 0, 1, "exclusive")} = 0.98
+        MaxBackoffs     (1,1) double {mustBeInteger, mustBePositive} = 50
+        PressureMin     (1,1) double {mustBePositive} = 1e5                  % [Pa]
+        PressureMax     (1,1) double {mustBePositive} = 35000 * 6894.757     % [Pa]
+        PressureFloor   (1,1) double {mustBePositive} = 1e3                  % [Pa] floor on P_L
+        % Phase-identity test at the returned root. Never molar density or Z:
+        % near the critical point of an asymmetric mixture the incipient liquid
+        % can have the higher Z while being heavier and denser by MASS.
+        %   "massDensity": rho_m,L > rho_m,V   (rho_m = M_mix / V)
+        %   "composition": incipient phase enriched in the heaviest component
+        %   "both" | "none"
+        PhaseIdentityTest (1,1) string {mustBeMember(PhaseIdentityTest, ...
+            ["massDensity", "composition", "both", "none"])} = "massDensity" 
     end
 
     methods
-        function obj = FlashEngine(eosEngine, stabilityEngine, varargin)
-            % Constructor attaching thermodynamic and stability operators
-            validateattributes(eosEngine, {'thermo.ConfinedEOS'}, {'scalar'});
-            validateattributes(stabilityEngine, {'solvers.StabilityTester'}, {'scalar'});
-
+        function obj = FlashEngine(eosEngine, stabilityEngine, opts)
+            arguments
+                eosEngine       (1,1) thermo.ConfinedEOS
+                stabilityEngine (1,1) solvers.StabilityTester
+                opts.MaxIterations
+                opts.Tolerance
+                opts.JacEpsilon
+                opts.LineSearchC1
+                opts.MaxLineSearch
+                opts.JacRegularizer
+                opts.MaxStepSizeK
+                opts.MaxStepSizeP
+                opts.MaxStepSizePcap
+                opts.PreconditionWithSS
+                opts.SSMaxIterations
+                opts.SSTolerance
+                opts.SSDamping
+                opts.SSMaxStepP
+                opts.DewBranch
+                opts.TrivialTol
+                opts.SeedMinLnK
+                opts.CoalescenceTol
+                opts.BackoffFactor
+                opts.MaxBackoffs
+                opts.PhaseIdentityTest
+                opts.PressureMin
+                opts.PressureMax
+                opts.PressureFloor
+            end
+            if stabilityEngine.EOS ~= eosEngine
+                error('FlashEngine:EngineMismatch', ...
+                    'StabilityTester must wrap the same ConfinedEOS instance.');
+            end
             obj.EOS = eosEngine;
             obj.Stability = stabilityEngine;
-            
-            if nargin > 2
-                obj.parseSolverOptions(varargin{:});
+            fn = fieldnames(opts);
+            for i = 1:numel(fn)
+                obj.(fn{i}) = opts.(fn{i});
             end
         end
 
-        function [Pdew, K_final, Pcap_final, Pliq_final, solverStats] = solveDewPoint(obj, T, P_guess, z, r_cap, varargin)
-            % Main execution entry point for non-isobaric & isobaric dew point prediction.
-            z = reshape(z, [], 1);
-            z = z / sum(z);
-
-            % Parse optional configuration flags for this run
-            solverType = 'newton';     % Default to full Newton-Raphson
-            capMode    = 'Pc';         % Default to Capillary Pressure tracking
-            K_seed     = [];
-            Pcap_seed  = [];
-
-            for idx = 1:2:length(varargin)
-                switch lower(string(varargin{idx}))
-                    case "solver",    solverType = lower(varargin{idx+1});
-                    case "capmode",   capMode    = varargin{idx+1};
-                    case "k_seed",    K_seed     = varargin{idx+1};
-                    case "pcap_seed", Pcap_seed  = varargin{idx+1};
-                end
+        function [Pdew, K_final, Pcap_final, Pliq_final, solverStats] = ...
+                solveDewPoint(obj, T, P_guess, z, r_cap, opts)
+            arguments
+                obj
+                T       (1,1) double {mustBePositive}
+                P_guess (1,1) double {mustBePositive}
+                z       (:,1) double {mustBeNonnegative}
+                r_cap   (1,1) double {mustBePositive}
+                opts.Solver         (1,1) string = "newton"
+                opts.CapMode        (1,1) string = "Combined"
+                opts.K_seed         double = []
+                opts.Pcap_seed      double = []
+                opts.PreconditionSS (1,1) logical = obj.PreconditionWithSS
+                opts.SSMaxIter      (1,1) double = obj.SSMaxIterations
+                opts.SSTol          (1,1) double = obj.SSTolerance
+            end
+            solver = lower(opts.Solver);
+            if solver == "broyden", solver = "quasinewton"; end
+            if ~any(solver == ["newton", "quasinewton", "ss"])
+                error('FlashEngine:UnknownSolver', 'Solver "%s" not recognised.', opts.Solver);
             end
 
-            % 1. Determine Dynamic Capillary Regime
-            % Capillarity is active ONLY if CapMode is not PL/NoCap AND r_cap is finite
-            isCapActive = ~strcmpi(capMode, 'PL') && ~strcmpi(capMode, 'NoCap') && ~isinf(r_cap);
-
-            % 2. Initialize Thermodynamic State Vector Seeding
-            if isempty(K_seed)
-                [isUnstable, ~, ~, K_tpd, ~, PL_tpd, Pc_tpd] = ...
-                    obj.Stability.evaluateDewStability(P_guess, T, z, r_cap, 'CapMode', capMode);
-                
-                if isUnstable && ~any(isnan(K_tpd))
-                    K_init = K_tpd; Pcap_init = Pc_tpd; PL_init = PL_tpd;
-                else
-                    Pc_vec = obj.EOS.Fluid.Pc(:); Tc_vec = obj.EOS.Fluid.Tc(:); om_vec = obj.EOS.Fluid.omega(:);
-                    K_init = (Pc_vec ./ P_guess) .* exp(5.37 .* (1 + om_vec) .* (1 - Tc_vec ./ T));
-                    Pcap_init = 0.0; PL_init = P_guess;
-                end
-            else
-                K_init    = K_seed;
-                Pcap_init = max(Pcap_seed, 0.0);
-                PL_init   = max(P_guess - Pcap_init, 1e3);
-            end
-
-            % 3. Assemble Dynamic Independent Variable Vector u
-            lnK0  = log(max(K_init(:), 1e-14));
-            lnPV0 = log(max(P_guess, 1e5));
-            
-            if isCapActive
-                % Combined Model System: Dimension = NC + 2
-                if strcmpi(capMode, 'pl')
-                    lnPmech0 = log(max(PL_init, 1e5));
-                else
-                    lnPmech0 = log(max(Pcap_init, 10.0));
-                end
-                u0 = [lnK0; lnPV0; lnPmech0];
-            else
-                % FWI-Only Model System: Dimension = NC + 1
-                u0 = [lnK0; lnPV0];
-            end
-
-            % Establish local search boundaries matching legacy robust frameworks
-            lnPV_min = log(0.5 * P_guess);
-            lnPV_max = log(3.0 * P_guess);
-
-            % 4. Execute Selected Iterative Solver Scheme
-            if strcmpi(solverType, 'quasinewton')
-                [u_converged, stats] = obj.executeBroydenSolver(u0, T, z, r_cap, isCapActive, capMode, lnPV_min, lnPV_max);
-            else
-                [u_converged, stats] = obj.executeNewtonSolver(u0, T, z, r_cap, isCapActive, capMode, lnPV_min, lnPV_max);
-            end
-
-            % 5. Unpack Converged State Boundaries
+            z  = z / sum(z);
             nc = obj.EOS.Fluid.NC;
-            K_final = exp(u_converged(1:nc));
-            Pdew    = exp(u_converged(nc+1));
-            
-            if isCapActive
-                if strcmpi(capMode, 'pl')
-                    Pliq_final = exp(u_converged(nc+2));
-                    Pcap_final = max(Pdew - Pliq_final, 0.0);
+            if numel(z) ~= nc
+                error('FlashEngine:CompositionSize', 'z has %d entries; NC = %d.', numel(z), nc);
+            end
+            isCap = solvers.StabilityTester.isCapillaryActive(opts.CapMode, r_cap);
+            if isCap && cosd(obj.EOS.Rock.Theta) <= 0
+                error('FlashEngine:NonWettingLiquid', ...
+                    'theta >= 90 deg gives Pcap <= 0; the ln(Pcap) formulation does not apply.');
+            end
+
+            % ---------- 1. Initial estimates ----------
+            [K0, Pcap0, seedSource] = obj.initialEstimates(T, P_guess, z, r_cap, isCap, opts);
+            [~, iHeavy] = max(obj.EOS.Fluid.Tc);
+            [~, iLight] = min(obj.EOS.Fluid.Tc);
+            K0(iHeavy) = min(K0(iHeavy), 0.95);
+            K0(iLight) = max(K0(iLight), 1.02);
+            PV0 = obj.clampP(P_guess);
+
+            % ---------- 2. Successive substitution ----------
+            ssStats = [];
+            if solver == "ss" || opts.PreconditionSS
+                if solver == "ss"
+                    [maxIt, tol] = deal(obj.MaxIterations, obj.Tolerance);
                 else
-                    Pcap_final = exp(u_converged(nc+2));
-                    Pliq_final = max(Pdew - Pcap_final, 1e3);
+                    [maxIt, tol] = deal(opts.SSMaxIter, opts.SSTol);
                 end
+                [PV_ss, K_ss, Pcap_ss, ssStats] = ...
+                    obj.executeSS(T, PV0, z, r_cap, K0, Pcap0, isCap, maxIt, tol);
+
+                if solver == "ss"
+                    Pdew        = PV_ss;
+                    K_final     = K_ss;
+                    Pcap_final  = Pcap_ss;
+                    Pliq_final  = obj.liquidPressure(PV_ss, Pcap_ss, isCap);
+                    solverStats = ssStats;
+                    solverStats.seed = seedSource;
+                    return;
+                end
+                if ssStats.usable
+                    [PV0, K0, Pcap0] = deal(PV_ss, K_ss, Pcap_ss);
+                end
+            end
+
+            % ---------- 3. Newton / Broyden ----------
+            if isCap
+                if Pcap0 <= 0
+                    Pcap0 = obj.consistentPcap(T, PV0, z, r_cap, K0);
+                end
+                u0 = [log(max(K0, 1e-14)); log(PV0); log(max(Pcap0, 1.0))];
             else
-                Pliq_final = Pdew;
+                u0 = [log(max(K0, 1e-14)); log(PV0)];
+            end
+            [u, solverStats] = obj.executeNewton(u0, T, z, r_cap, isCap, solver == "quasinewton");
+
+            K_final = exp(u(1:nc));
+            Pdew    = exp(u(nc+1));
+            if isCap
+                Pcap_final = exp(u(nc+2));
+            else
                 Pcap_final = 0.0;
             end
-            
-            solverStats = stats;
+            Pliq_final = obj.liquidPressure(Pdew, Pcap_final, isCap);
+            solverStats.seed = seedSource;
+            solverStats.ss   = ssStats;
         end
     end
 
     methods (Access = private)
-        function [u, stats] = executeNewtonSolver(obj, u0, T, z, r_cap, isCapActive, capMode, lnPV_min, lnPV_max)
-            % Full Newton-Raphson algorithm with numerical Jacobian and backtracking line search
-            u = obj.projectFeasibleDomain(u0, isCapActive, capMode, lnPV_min, lnPV_max);
-            iterLog = zeros(obj.MaxIterations, 1);
-
-            for iter = 1:obj.MaxIterations
-                % Evaluate baseline residual
-                [res, ~] = obj.evaluateResidualVector(u, T, z, r_cap, isCapActive, capMode);
-                norm_res = norm(res, inf);
-                iterLog(iter) = norm_res;
-
-                if norm_res < obj.Tolerance
-                    stats = struct('iterations', iter, 'residual_norm', norm_res, 'converged', true, 'history', iterLog(1:iter));
-                    return;
+        % ================= Initialisation =================
+        function [K0, Pcap0, source] = initialEstimates(obj, T, P_guess, z, r_cap, isCap, opts)
+            nc = numel(z);
+            if ~isempty(opts.K_seed)
+                if numel(opts.K_seed) ~= nc
+                    error('FlashEngine:SeedSize', 'K_seed must have NC = %d entries.', nc);
                 end
-
-                % Compute Finite-Difference Jacobian Matrix
-                J = obj.computeProjectedCentralJacobian(u, T, z, r_cap, isCapActive, capMode, lnPV_min, lnPV_max);
-                
-                if obj.JacRegularizer > 0
-                    J = J + obj.JacRegularizer * eye(size(J));
+                K0 = opts.K_seed(:);
+                Pcap0 = 0.0;
+                if isCap && ~isempty(opts.Pcap_seed)
+                    Pcap0 = max(opts.Pcap_seed, 0.0);
                 end
-                
-                step = -J \ res;
-
-                % --- CRITICAL STEP-CLIPPING safeguard rail ---
-                % Restricts the step velocity in log-space to prevent the solver 
-                % from overshooting and falling into inverted/bubble point basins.
-                if max(abs(step)) > obj.MaxStepSize
-                    step = step * (obj.MaxStepSize / max(abs(step)));
-                end
-
-                % Armijo Backtracking Line Search
-                alpha = 1.0;
-                u_new = obj.projectFeasibleDomain(u + alpha * step, isCapActive, capMode, lnPV_min, lnPV_max);
-                [res_new, ~] = obj.evaluateResidualVector(u_new, T, z, r_cap, isCapActive, capMode);
-                
-                ls_iter = 0;
-                while norm(res_new, inf) > (1 - obj.LineSearchC1 * alpha) * norm_res && ls_iter < obj.MaxLineSearch
-                    alpha = alpha * 0.5;
-                    u_new = obj.projectFeasibleDomain(u + alpha * step, isCapActive, capMode, lnPV_min, lnPV_max);
-                    [res_new, ~] = obj.evaluateResidualVector(u_new, T, z, r_cap, isCapActive, capMode);
-                    ls_iter = ls_iter + 1;
-                end
-
-                % Check step size stalling
-                if norm(u_new - u, inf) < 1e-12
-                    break;
-                end
-                u = u_new;
+                source = "user";
+                return;
             end
 
-            stats = struct('iterations', iter, 'residual_norm', norm_res, 'converged', false, 'history', iterLog(1:iter));
-        end
-
-        function [u, stats] = executeBroydenSolver(obj, u0, T, z, r_cap, isCapActive, capMode, lnPV_min, lnPV_max)
-            % Broyden Quasi-Newton rank-1 update solver
-            u = obj.projectFeasibleDomain(u0, isCapActive, capMode, lnPV_min, lnPV_max);
-            [res, ~] = obj.evaluateResidualVector(u, T, z, r_cap, isCapActive, capMode);
-            norm_res = norm(res, inf);
-
-            % Seed initial Jacobian via finite differences
-            J = obj.computeProjectedCentralJacobian(u, T, z, r_cap, isCapActive, capMode, lnPV_min, lnPV_max);
-            B = J;
-
-            if obj.JacRegularizer > 0
-                B = B + obj.JacRegularizer * eye(size(B));
-            end
-            iterLog = zeros(obj.MaxIterations, 1);
-
-            for iter = 1:obj.MaxIterations
-                iterLog(iter) = norm_res;
-                if norm_res < obj.Tolerance
-                    stats = struct('iterations', iter, 'residual_norm', norm_res, 'converged', true, 'history', iterLog(1:iter));
-                    return;
-                end
-                
-                step = -B \ res;
-
-                % --- CRITICAL STEP-CLIPPING safeguard rail ---
-                if max(abs(step)) > obj.MaxStepSize
-                    step = step * (obj.MaxStepSize / max(abs(step)));
-                end
-                
-                % Line search
-                alpha = 1.0;
-                u_new = obj.projectFeasibleDomain(u + alpha * step, isCapActive, capMode, lnPV_min, lnPV_max);
-                [res_new, ~] = obj.evaluateResidualVector(u_new, T, z, r_cap, isCapActive, capMode);
-                
-                ls_iter = 0;
-                while norm(res_new, inf) > (1 - obj.LineSearchC1 * alpha) * norm_res && ls_iter < obj.MaxLineSearch
-                    alpha = alpha * 0.5;
-                    u_new = obj.projectFeasibleDomain(u + alpha * step, isCapActive, capMode, lnPV_min, lnPV_max);
-                    [res_new, ~] = obj.evaluateResidualVector(u_new, T, z, r_cap, isCapActive, capMode);
-                    ls_iter = ls_iter + 1;
-                end
-
-                % Broyden Rank-1 Matrix Update: B_{k+1} = B_k + ((y - B_k * s) * s^T) / (s^T * s)
-                s = u_new - u;
-                y_vec = res_new - res;
-                if norm(s) > 1e-14
-                    B = B + ((y_vec - B * s) * s') / (s' * s);
-                end
-                if norm(s, inf) < 1e-12
-                    break;
-                end
-
-                u = u_new;
-                res = res_new;
-                norm_res = norm(res, inf);
-            end
-
-            stats = struct('iterations', iter, 'residual_norm', norm_res, 'converged', false, 'history', iterLog(1:iter));
-        end
-
-        function [F, stateData] = evaluateResidualVector(obj, u, T, z, r_cap, isCapActive, capMode)
-            % Evaluates the NC+2 residual vector for non-isobaric phase equilibrium
-            nc = obj.EOS.Fluid.NC;
-            
+            capMode = "FWIOnly";
+            if isCap, capMode = "Combined"; end
             try
-                % 1. Unpack state coordinates
-                K    = exp(u(1:nc));
-                P_v  = exp(u(nc+1));
-                
-                % Trivial Root Deflection Gate
-                if max(abs(log(K))) < 1e-2
-                    F = 1e3 * ones(length(u), 1);
-                    stateData = struct('P_v', P_v, 'P_l', P_v, 'P_cap', 0, 'Z_V', 1, 'Z_L', 1, 'x_norm', z);
+                [isUnstable, ~, ~, K_tpd, ~, ~, Pcap_tpd] = ...
+                    obj.Stability.evaluateDewStability(P_guess, T, z, r_cap, 'CapMode', capMode);
+                if isUnstable && all(isfinite(K_tpd)) && norm(log(K_tpd)) > obj.SeedMinLnK
+                    K0 = K_tpd(:);
+                    Pcap0 = isCap * Pcap_tpd;
+                    source = "tpd";
                     return;
                 end
-                
-                if isCapActive
-                    if strcmpi(capMode, 'pl')
-                        P_l   = exp(u(nc+2));
-                        P_cap = max(P_v - P_l, 0.0);
-                    else
-                        P_cap = exp(u(nc+2));
-                        P_l   = max(P_v - P_cap, 1e3);
+            catch ME
+                if ~obj.isModelFailure(ME), rethrow(ME); end
+            end
+            K0 = obj.EOS.wilsonK(P_guess, T);
+            Pcap0 = 0.0;
+            source = "wilson";
+        end
+
+        function Pcap = consistentPcap(obj, T, PV, z, r_cap, K)
+            % Few fixed-point passes so ln(Pcap) starts on the right scale.
+            x = z ./ K;  x = x / sum(x);
+            Pcap = 0.0;
+            try
+                [~, ~, V_V] = obj.EOS.calculateState(PV, T, z, -1, r_cap);
+                for k = 1:5
+                    PL = obj.liquidPressure(PV, Pcap, true);
+                    [~, ~, V_L] = obj.EOS.calculateState(PL, T, x, +1, r_cap);
+                    Pcap = obj.EOS.capillaryPressure(x, z, V_L, V_V, r_cap);
+                end
+            catch ME
+                if ~obj.isModelFailure(ME), rethrow(ME); end
+            end
+            Pcap = min(max(Pcap, 1.0), 0.5 * PV);
+        end
+
+        % ================= Successive substitution =================
+        function [PV, K, Pcap, stats] = executeSS(obj, T, PV0, z, r_cap, K0, Pcap0, isCap, maxIter, tol)
+            lnK  = log(max(K0(:), 1e-14));
+            lnP  = log(obj.clampP(PV0));
+            Pcap = isCap * max(Pcap0, 0.0);
+            branchSlope = -1;                         % d ln S / d ln P_V on the upper dew branch
+            if obj.DewBranch == "lower", branchSlope = +1; end
+
+            prev = [];
+            nBack = 0;
+            converged = false;
+            reason = "max-iterations";
+            err = Inf;
+            st = obj.phaseState(z, z, NaN, NaN, NaN, NaN, NaN);
+
+            for iter = 1:maxIter
+                PV = exp(lnP);
+                PL = obj.liquidPressure(PV, Pcap, isCap);
+                x  = z .* exp(-lnK);
+                x  = x / sum(x);
+
+                try
+                    [lnphiV, ZV, VV] = obj.EOS.calculateState(PV, T, z, -1, r_cap);
+                    [lnphiL, ZL, VL] = obj.EOS.calculateState(PL, T, x, +1, r_cap);
+                catch ME
+                    if ~obj.isModelFailure(ME), rethrow(ME); end
+                    [lnP, nBack, prev] = obj.backoff(lnP, nBack);
+                    if nBack > obj.MaxBackoffs, reason = "model-failure"; break; end
+                    continue;
+                end
+
+                lnK_new = lnphiL + log(PL) - lnphiV - log(PV);
+                if norm(lnK_new) < obj.TrivialTol || abs(ZV - ZL) < obj.CoalescenceTol
+                    [lnP, nBack, prev] = obj.backoff(lnP, nBack);
+                    if nBack > obj.MaxBackoffs, reason = "trivial"; break; end
+                    continue;
+                end
+                st = obj.phaseState(z, x, ZV, ZL, VV, VL, sum(z .* exp(-lnK_new)) - 1);
+
+                % Pressure update: secant on ln S(ln P_V) = 0, branch-signed start
+                lnS = log(sum(z .* exp(-lnK_new)));
+                slope = branchSlope;
+                if ~isempty(prev) && abs(lnP - prev(1)) > 1e-12
+                    sec = (lnS - prev(2)) / (lnP - prev(1));
+                    if isfinite(sec) && abs(sec) > 1e-3
+                        slope = sec;
                     end
-                else
-                    P_l   = P_v;
-                    P_cap = 0.0;
+                end
+                dlnP = max(min(-lnS / slope, obj.SSMaxStepP), -obj.SSMaxStepP);
+                prev = [lnP, lnS];
+
+                % Capillary pressure from the current incipient-liquid state
+                errCap = 0.0;
+                if isCap
+                    Pcap_new = obj.EOS.capillaryPressure(x, z, VL, VV, r_cap);
+                    errCap   = abs(Pcap_new - Pcap) / max(Pcap, obj.PressureFloor);
+                    Pcap     = obj.SSDamping * Pcap_new + (1 - obj.SSDamping) * Pcap;
                 end
 
-                % 2. Calculate trial liquid composition for dew-point tracing (x_i = z_i / K_i)
-                x_raw = z ./ max(K, 1e-14);
-                x_raw = max(x_raw, 1e-16);
-                sx = sum(x_raw);
+                err = max([norm(lnK_new - lnK, Inf), abs(lnS), errCap]);
+                lnK = obj.SSDamping * lnK_new + (1 - obj.SSDamping) * lnK;
+                lnP = log(obj.clampP(exp(lnP + dlnP)));
 
-                if ~isfinite(sx) || sx <= 0
-                    F = 1e3 * ones(length(u), 1);
-                    stateData = struct('P_v', P_v, 'P_l', P_l, 'P_cap', P_cap, 'Z_V', 1, 'Z_L', 1, 'x_norm', z);
-                    return;
+                if err < tol
+                    converged = true;
+                    reason = "converged";
+                    break;
                 end
-                x_norm = x_raw / sx;
+            end
 
-                % 3. Evaluate Phase Fugacities and Molar Volumes via ConfinedEOS
-                [lnphi_V, Z_V, V_V] = obj.EOS.calculateState(P_v, T, z, -1, r_cap);
-                [lnphi_L, Z_L, V_L] = obj.EOS.calculateState(P_l, T, x_norm, 1, r_cap);
+            PV = exp(lnP);
+            K  = exp(lnK);
+            usable = all(isfinite(K)) && isfinite(PV) && norm(lnK) >= obj.TrivialTol ...
+                     && ~any(reason == ["model-failure", "trivial"]);
+            stats = struct('converged', converged, 'usable', usable, 'reason', reason, ...
+                'iterations', iter, 'backoffs', nBack, 'residual_norm', err, ...
+                'solver', "SS-" + obj.modeLabel(isCap), ...
+                'Z_V', st.Z_V, 'Z_L', st.Z_L, 'rho_v', 1 / st.V_V, 'rho_l', 1 / st.V_L, ...
+                'sumX_res', st.sumX_res, 'rhoM_V', st.rhoM_V, 'rhoM_L', st.rhoM_L, ...
+                'heavyEnriched', st.heavyEnriched, 'incipientIsLiquid', obj.identityOK(st), ...
+                'Pcap', Pcap, 'PL', obj.liquidPressure(PV, Pcap, isCap));
+        end
 
-                % 4. Evaluate based on the CapActive
-                F = zeros(length(u), 1);
-                
-                if isCapActive
-                    % Combined Model Equations (Size NC + 2)
-                    F(1:nc) = log(K) - (lnphi_L - lnphi_V + log(P_l) - log(P_v));
-                    F(nc+1) = sx - 1.0;
-                    
-                    rho_l_SI = 1.0 / V_L; 
-                    rho_v_SI = 1.0 / V_V; 
-                    Pcap_pred = obj.evaluateYoungLaplaceIFT(x_norm, z, rho_l_SI, rho_v_SI, r_cap);
-                    
-                    if strcmpi(capMode, 'pl')
-                        F(nc+2) = P_v - P_l - Pcap_pred;
-                    else
-                        F(nc+2) = Pcap_pred - P_cap;
-                    end
-                else
-                    % FWI-Only Model Equations (Size NC + 1)
-                    F(1:nc) = log(K) - (lnphi_L - lnphi_V);
-                    F(nc+1) = sx - 1.0;
-                end
+        function [lnP, nBack, prev] = backoff(obj, lnP, nBack)
+            lnP   = log(obj.clampP(exp(lnP) * obj.BackoffFactor));
+            nBack = nBack + 1;
+            prev  = [];                               % secant history invalid after a jump
+        end
 
-                if any(~isfinite(F))
-                    F = 1e3 * ones(length(u), 1);
-                end
-                stateData = struct('P_v', P_v, 'P_l', P_l, 'P_cap', P_cap, 'Z_V', Z_V, 'Z_L', Z_L, 'x_norm', x_norm);
-            catch
-                F = 1e3 * ones(length(u), 1);
-                stateData = struct('P_v', exp(u(nc+1)), 'P_l', exp(u(nc+1)), 'P_cap', 0, 'Z_V', 1, 'Z_L', 1, 'x_norm', z);
+        % ================= Newton / Broyden =================
+        function [u, stats] = executeNewton(obj, u0, T, z, r_cap, isCap, useBroyden)
+            nc = obj.EOS.Fluid.NC;
+            u  = obj.project(u0, isCap);
+            [F, st, ok] = obj.residual(u, T, z, r_cap, isCap);
+            if ~ok
+                stats = obj.newtonStats(false, "initial-state-failure", 0, Inf, st, useBroyden, u, nc, isCap);
                 return;
             end
-        end
 
-        function J = computeProjectedCentralJacobian(obj, u, T, z, r_cap, isCapActive, capMode, lnPV_min, lnPV_max)
-            % Central/Forward finite-difference Jacobian construction
-            n = length(u);
-            J = zeros(n, n);
+            J = [];
+            freshJ = false;
+            reason = "max-iterations";
+            iter = 0;
+            for iter = 1:obj.MaxIterations
+                if norm(F, Inf) < obj.Tolerance
+                    reason = "converged";
+                    break;
+                end
+                if isempty(J) || ~useBroyden
+                    J = obj.jacobian(u, F, T, z, r_cap, isCap);
+                    freshJ = true;
+                end
 
-            for j = 1:n
-                uj = u(j);
-                h = obj.JacEpsilon * max(1.0, abs(uj));
+                du = obj.limitStep(obj.solveLinear(J, -F), nc, isCap);
 
-                % Formulate perturbed state vectors
-                u_f = u; u_f(j) = uj + h;
-                u_b = u; u_b(j) = uj - h;
+                f0 = 0.5 * (F.' * F);
+                alpha = 1.0;
+                accepted = false;
+                for ls = 1:obj.MaxLineSearch
+                    ut = obj.project(u + alpha * du, isCap);
+                    if norm(ut(1:nc)) >= obj.TrivialTol
+                        [Ft, stt, okt] = obj.residual(ut, T, z, r_cap, isCap);
+                        if okt && abs(stt.Z_V - stt.Z_L) >= obj.CoalescenceTol ...
+                                && 0.5 * (Ft.' * Ft) <= (1 - 2 * obj.LineSearchC1 * alpha) * f0
+                            accepted = true;
+                            break;
+                        end
+                    end
+                    alpha = 0.5 * alpha;
+                end
 
-                % Pass perturbations through the feasibility projection block
-                u_f_proj = obj.projectFeasibleDomain(u_f, isCapActive, capMode, lnPV_min, lnPV_max);
-                u_b_proj = obj.projectFeasibleDomain(u_b, isCapActive, capMode, lnPV_min, lnPV_max);
-
-                denom = u_f_proj(j) - u_b_proj(j);
-
-                if abs(denom) < 1e-10
-                    % Fall back to a projected forward difference if bounded
-                    u_f_proj = obj.projectFeasibleDomain(u, isCapActive, capMode, lnPV_min, lnPV_max);
-                    u_pert = u_f_proj; u_pert(j) = u_f_proj(j) + h;
-                    u_pert_proj = obj.projectFeasibleDomain(u_pert, isCapActive, capMode, lnPV_min, lnPV_max);
-                    
-                    [res0, ~]    = obj.evaluateResidualVector(u_f_proj, T, z, r_cap, isCapActive, capMode);
-                    [res_pert, ~]= obj.evaluateResidualVector(u_pert_proj, T, z, r_cap, isCapActive, capMode);
-
-                    denom_fwd = u_pert_proj(j) - u_f_proj(j);
-                    J(:, j) = (res_pert - res0) / max(denom_fwd, 1e-10);
+                if accepted
+                    if useBroyden
+                        s = ut - u;
+                        J = J + ((Ft - F) - J * s) * s.' / (s.' * s);
+                        freshJ = false;
+                    end
+                    [u, F, st] = deal(ut, Ft, stt);
+                elseif useBroyden && ~freshJ
+                    J = [];                           % refresh with finite differences and retry
                 else
-                    [res_f, ~] = obj.evaluateResidualVector(u_f_proj, T, z, r_cap, isCapActive, capMode);
-                    [res_b, ~] = obj.evaluateResidualVector(u_b_proj, T, z, r_cap, isCapActive, capMode);
-                    J(:, j) = (res_f - res_b) / denom;
+                    reason = "line-search-failure";
+                    break;
                 end
             end
+            if norm(F, Inf) < obj.Tolerance, reason = "converged"; end
+            stats = obj.newtonStats(reason == "converged", reason, iter, norm(F, Inf), ...
+                                    st, useBroyden, u, nc, isCap);
         end
 
-        function Pcap = evaluateYoungLaplaceIFT(obj, x, y, rho_l_SI, rho_v_SI, r_cap)
-            % Evaluates interfacial tension and capillary pressure in SI units [Pa]
-            if isinf(r_cap)
-                Pcap = 0.0;
-                return;
-            end
-
-            Pch = obj.EOS.Fluid.Parachor(:);
-
-            % Convert molar densities from mol/m^3 to gmol/cm^3 for standard Parachor correlation
-            rho_l_cgs = rho_l_SI * 1e-6;
-            rho_v_cgs = rho_v_SI * 1e-6;
-
-            ift_param = sum(Pch .* (x .* rho_l_cgs - y .* rho_v_cgs));
-            sigma_mN_m = max(ift_param, 0.0)^4;       % Interfacial tension in mN/m
-            sigma_N_m  = sigma_mN_m / 1000;            % Convert to N/m
-
-            theta_rad = deg2rad(obj.EOS.Rock.Theta);
-            Pcap = (2.0 * sigma_N_m * cos(theta_rad)) / r_cap;
-        end
-
-        function u_proj = projectFeasibleDomain(~, u, isCapActive, capMode, lnPV_min, lnPV_max)
-            % Enforces physical boundaries during iteration steps
-            u_proj = u;
-
-            if isCapActive
-                n = length(u) - 2;
-
-                % 1. Clamp Vapor Pressure between 0.1 bar (1e4 Pa) and 1000 bar (1e8 Pa)
-                u_proj(n+1) = min(max(u_proj(n+1), lnPV_min), lnPV_max);
-
-                % 2. Constrain Mechanical Pressure Variable
-                if strcmpi(capMode, 'pc')
-                    margin = log(1 + 1e-5);
-                    u_proj(n+2) = min(u_proj(n+2), u_proj(n+1) - margin);
-                else
-                    u_proj(n+2) = min(u_proj(n+2), u_proj(n+1));
-                end
+        function [F, st, ok] = residual(obj, u, T, z, r_cap, isCap)
+            nc  = numel(z);
+            lnK = u(1:nc);
+            PV  = exp(u(nc+1));
+            if isCap
+                Pcap = exp(u(nc+2));
             else
-                n = length(u) - 1;
-                u_proj(n+1) = min(max(u_proj(n+1), lnPV_min), lnPV_max);
+                Pcap = 0.0;
+            end
+            PL = obj.liquidPressure(PV, Pcap, isCap);
+            xr = z .* exp(-lnK);
+            S  = sum(xr);
+            x  = xr / S;
+
+            try
+                [lnphiV, ZV, VV] = obj.EOS.calculateState(PV, T, z, -1, r_cap);
+                [lnphiL, ZL, VL] = obj.EOS.calculateState(PL, T, x, +1, r_cap);
+            catch ME
+                if ~obj.isModelFailure(ME), rethrow(ME); end
+                F = []; ok = false;
+                st = obj.phaseState(z, x, NaN, NaN, NaN, NaN, S - 1);
+                st.PL = PL;  st.Pcap = Pcap;
+                return;
+            end
+
+            F = [lnK - (lnphiL + log(PL) - lnphiV - log(PV)); S - 1];
+            if isCap
+                Pcap_pred = obj.EOS.capillaryPressure(x, z, VL, VV, r_cap);
+                F(end+1, 1) = Pcap_pred / Pcap - 1;
+            end
+            ok = all(isfinite(F));
+            st = obj.phaseState(z, x, ZV, ZL, VV, VL, S - 1);
+            st.PL = PL;  st.Pcap = Pcap;
+        end
+
+        function J = jacobian(obj, u, F0, T, z, r_cap, isCap)
+            % Central differences; one-sided where a side is infeasible or
+            % the model fails; zero column (handled by LM solve) if both fail.
+            n = numel(u);
+            J = zeros(numel(F0), n);
+            for j = 1:n
+                h  = obj.JacEpsilon * max(1.0, abs(u(j)));
+                uf = u; uf(j) = uf(j) + h; uf = obj.project(uf, isCap);
+                ub = u; ub(j) = ub(j) - h; ub = obj.project(ub, isCap);
+                [Ff, ~, okf] = obj.residual(uf, T, z, r_cap, isCap);
+                [Fb, ~, okb] = obj.residual(ub, T, z, r_cap, isCap);
+                okf = okf && uf(j) > u(j);
+                okb = okb && ub(j) < u(j);
+                if okf && okb
+                    J(:, j) = (Ff - Fb) / (uf(j) - ub(j));
+                elseif okf
+                    J(:, j) = (Ff - F0) / (uf(j) - u(j));
+                elseif okb
+                    J(:, j) = (F0 - Fb) / (u(j) - ub(j));
+                end
             end
         end
 
-        function parseSolverOptions(obj, varargin)
-            % Overrides internal numerical tolerances dynamically
-            for idx = 1:2:length(varargin)
-                switch lower(string(varargin{idx}))
-                    case "maxiterations",  obj.MaxIterations  = varargin{idx+1};
-                    case "tolerance",      obj.Tolerance      = varargin{idx+1};
-                    case "jacepsilon",     obj.JacEpsilon     = varargin{idx+1};
-                    case "linesearchc1",   obj.LineSearchC1   = varargin{idx+1};
-                    case "jacregularizer", obj.JacRegularizer = varargin{idx+1};
-                    case "maxstepsize",    obj.MaxStepSize    = varargin{idx+1};
-                end
+        function du = solveLinear(obj, J, b)
+            if rcond(J) > 1e-14
+                du = J \ b;
+            else
+                JtJ = J.' * J;
+                mu  = obj.JacRegularizer * max(1, norm(JtJ, 1));
+                du  = (JtJ + mu * eye(size(JtJ))) \ (J.' * b);
             end
+        end
+
+        function du = limitStep(obj, du, nc, isCap)
+            sK = norm(du(1:nc), Inf);
+            if sK > obj.MaxStepSizeK
+                du(1:nc) = du(1:nc) * (obj.MaxStepSizeK / sK);
+            end
+            du(nc+1) = max(min(du(nc+1), obj.MaxStepSizeP), -obj.MaxStepSizeP);
+            if isCap
+                du(nc+2) = max(min(du(nc+2), obj.MaxStepSizePcap), -obj.MaxStepSizePcap);
+            end
+        end
+
+        function u = project(obj, u, isCap)
+            nc = numel(u) - 1 - isCap;
+            u(nc+1) = min(max(u(nc+1), log(obj.PressureMin)), log(obj.PressureMax));
+            if isCap
+                % Keep P_L = P_V - Pcap above the floor
+                PV = exp(u(nc+1));
+                u(nc+2) = min(u(nc+2), log(max(PV - obj.PressureFloor, 1.0)));
+            end
+        end
+
+        function stats = newtonStats(obj, converged, reason, iter, resNorm, st, useBroyden, u, nc, isCap)
+            if converged && norm(u(1:nc)) < obj.TrivialTol
+                converged = false;
+                reason = "trivial";
+            end
+            incipientIsLiquid = obj.identityOK(st);
+            if converged && ~incipientIsLiquid
+                converged = false;
+                reason = "phase-identity (" + obj.PhaseIdentityTest + ")";
+            end
+            name = "Newton-Raphson";
+            if useBroyden, name = "Quasi-Newton-Broyden"; end
+            stats = struct('converged', converged, 'reason', reason, 'iterations', iter, ...
+                'residual_norm', resNorm, 'solver', name + "-" + obj.modeLabel(isCap), ...
+                'Z_V', st.Z_V, 'Z_L', st.Z_L, 'rho_v', 1 / st.V_V, 'rho_l', 1 / st.V_L, ...
+                'sumX_res', st.sumX_res, 'rhoM_V', st.rhoM_V, 'rhoM_L', st.rhoM_L, ...
+                'heavyEnriched', st.heavyEnriched, 'incipientIsLiquid', incipientIsLiquid, ...
+                'Pcap', st.Pcap, 'PL', st.PL);
+        end
+
+        % ================= Helpers =================
+        function st = phaseState(obj, z, x, ZV, ZL, VV, VL, sumXres)
+            % Phase state at a root, with mass densities [kg/m^3] and heavy enrichment.
+            MW = obj.EOS.Fluid.MW(:);
+            [~, iH] = max(MW);
+            st = struct('Z_V', ZV, 'Z_L', ZL, 'V_V', VV, 'V_L', VL, 'sumX_res', sumXres, ...
+                'rhoM_V', 1e-3 * (z(:).' * MW) / VV, 'rhoM_L', 1e-3 * (x(:).' * MW) / VL, ...
+                'heavyEnriched', x(iH) > z(iH));
+        end
+
+        function tf = identityOK(obj, st)
+            massOK = st.rhoM_L > st.rhoM_V;          % false for NaN states
+            compOK = st.heavyEnriched;
+            switch obj.PhaseIdentityTest
+                case "massDensity", tf = massOK;
+                case "composition", tf = compOK;
+                case "both",        tf = massOK && compOK;
+                otherwise,          tf = true;
+            end
+        end
+
+        function P = clampP(obj, P)
+            P = min(max(P, obj.PressureMin), obj.PressureMax);
+        end
+
+        function PL = liquidPressure(obj, PV, Pcap, isCap)
+            if isCap
+                PL = max(PV - Pcap, obj.PressureFloor);
+            else
+                PL = PV;
+            end
+        end
+    end
+
+    methods (Static, Access = private)
+        function tf = isModelFailure(ME)
+            % Only EOS domain failures are recoverable; coding errors propagate.
+            tf = startsWith(string(ME.identifier), "ConfinedEOS:");
+        end
+
+        function s = modeLabel(isCap)
+            if isCap, s = "Combined"; else, s = "FWIOnly"; end
         end
     end
 end
