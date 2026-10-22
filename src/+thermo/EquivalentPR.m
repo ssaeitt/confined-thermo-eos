@@ -110,8 +110,9 @@ classdef EquivalentPR
                 fprintf(fid, '-- EOSNUM %d : %s | rock %s | r_p = %.3f nm\n', k, eqs(k).Label, ...
                         eqs(k).RockName, eqs(k).r_cap * 1e9);
             end
-            fprintf(fid, '-- Generated %s. Valid ONLY isothermally at this T.\n\n', ...
+            fprintf(fid, '-- Generated %s. Valid ONLY isothermally at this T.\n', ...
                     string(datetime('now', 'Format', 'yyyy-MM-dd HH:mm')));
+            fprintf(fid, '-- Set RTEMP (or the temperature table) to %.2f degC in the deck.\n\n', e1.T - 273.15);
             fprintf(fid, 'EOS\n');
             for k = 1:numel(eqs), fprintf(fid, 'PR /\n'); end
             fprintf(fid, '\nPRCORR\n\nCNAMES\n');
