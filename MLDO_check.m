@@ -10,6 +10,11 @@
 % For each: bulk Pdew (SaturationSolver, upper dew branch checked by flash), then a
 % CCE from Pdew down to cfg.PminFrac * Pdew, MLDO in vol% of V_sat and its pressure.
 %
+% Section 5 (cfg.bipSweep): one BIP pair is varied at the NOMINAL compositions of
+% every 20 degC fluid that contains the pair (default C1-nC5: F1-F4 and F10), all
+% other BIPs from sheet BIP. Answers whether the composition adjustment or the BIP
+% is the right handle for the bulk Pdew.
+%
 % Bulk only: no confinement term is involved (c_i = 0 at r_p = Inf), so k, p,
 % lambda and the TIPs play no role here. Nothing is fitted.
 %
@@ -32,6 +37,9 @@ cfg.bipSheets    = struct('workbook', "BIP", 'literature', "BIP_Literature");
 cfg.PminFrac     = 0.10;       % CCE down to 10 % of Pdew
 cfg.nCoarse      = 40;         % CCE points below 0.95 Pdew
 cfg.wallRock     = "EF2";      % only needed to build the EOS object (no effect at r = Inf)
+cfg.bipSweep     = struct('pair', ["C1", "nC5"], ...
+                          'values', [0.012022, 0.008, 0.005, 0.002, 0.0005, 0, -0.005], ...
+                          'T', 293.15);           % set 'values' to [] to skip section 5
 
 if ~isfile(cfg.mixtureFile)
     error('mldo:NoWorkbook', 'Workbook not found (config/ is local only): %s', cfg.mixtureFile);
@@ -113,12 +121,14 @@ for compLabel = cfg.compositions
         sel = R.Composition == compLabel & R.BIPset == bipLabel & abs(R.T_C - 20) < 1e-6 ...
               & isfinite(R.Pdew_model_psi);
         if ~any(sel), continue; end
+        clean = sel & ~contains(R.Status, "failure");    % MLDO only from complete CCEs
         S(end+1, :) = {compLabel, bipLabel, nnz(sel), mean(abs(R.Pdew_err_pct(sel))), ...
-            mean(abs(R.MLDO_diff_pts(sel)), 'omitnan'), mean(R.MLDO_diff_pts(sel), 'omitnan')}; %#ok<AGROW>
+            mean(abs(R.MLDO_diff_pts(clean)), 'omitnan'), mean(R.MLDO_diff_pts(clean), 'omitnan'), ...
+            nnz(sel & ~clean)}; %#ok<AGROW>
     end
 end
 S = cell2table(S, 'VariableNames', {'Composition', 'BIPset', 'nFluids', 'MAE_Pdew_pct', ...
-    'MAE_MLDO_pts', 'Bias_MLDO_pts'});
+    'MAE_MLDO_pts', 'Bias_MLDO_pts', 'nExcluded_CCE_failures'});
 S = convertvars(S, {'Composition', 'BIPset'}, 'string');
 disp(S);
 writetable(S, fullfile(cfg.outDir, "mldo_summary.csv"));
@@ -154,7 +164,89 @@ end
 exportgraphics(gcf, fullfile(cfg.outDir, "mldo_check.png"), 'Resolution', 200);
 fprintf('\nWritten: %s\n', cfg.outDir);
 
+%% 5. BIP sweep at nominal compositions ----------------------------------------------------------
+if ~isempty(cfg.bipSweep.values)
+    pr = cfg.bipSweep.pair;
+    fprintf('\nBIP sweep %s-%s at nominal compositions (all other BIPs from sheet BIP)\n', pr(1), pr(2));
+    swRows = {};
+    for i = 1:height(bp)
+        mix = string(bp.Mixture(i));
+        if abs(bp.T(i) - cfg.bipSweep.T) > 1e-6 || ~all(ismember(pr, split(mix, "-"))), continue; end
+        z = localParseZ(bp.mole_frac(i));
+        fl0 = entities.FluidProperties.loadFromWorkbook(cfg.mixtureFile, mix);
+        for v = cfg.bipSweep.values
+            fl  = localSetBIP(fl0, pr, v);
+            eos = thermo.ConfinedEOS(fl, rock);
+            sat = solvers.SaturationSolver(eos);
+            pt  = solvers.PTFlash(eos);
+            [res, branch] = localUpperDew(sat, pt, bp.T(i), bp.Bulk_Pdew(i) * psi, z);
+            [mldo, pm, nFail] = deal(NaN, NaN, 0);
+            if res.converged
+                pvt = solvers.PVTExperiments(pt);
+                cce = pvt.cce(bp.T(i), z, Inf, res.P, ...
+                      solvers.PVTExperiments.pressureGrid(res.P, cfg.PminFrac * res.P, cfg.nCoarse));
+                [mldo, pm] = solvers.PVTExperiments.mldo(cce);
+                nFail = nnz(cce.reason ~= "converged" & cce.reason ~= "stable");
+            end
+            Pm = res.P / psi;  if ~res.converged, Pm = NaN; end
+            swRows(end+1, :) = {string(bp.Fluid_ID(i)), mix, v, bp.Bulk_Pdew(i), Pm, ...
+                100 * (Pm / bp.Bulk_Pdew(i) - 1), bp.MLDO_pct(i), mldo, mldo - bp.MLDO_pct(i), ...
+                bp.P_MLDO_psi(i), pm, nFail, branch}; %#ok<AGROW>
+            fprintf('  %-4s BIP %+.4f : Pdew %+6.2f %% | MLDO %5.1f (exp %4.1f)\n', ...
+                    string(bp.Fluid_ID(i)), v, 100 * (Pm / bp.Bulk_Pdew(i) - 1), mldo, bp.MLDO_pct(i));
+        end
+    end
+    W = cell2table(swRows, 'VariableNames', {'Fluid', 'Mixture', 'BIP', 'Pdew_exp_psi', 'Pdew_model_psi', ...
+        'Pdew_err_pct', 'MLDO_exp_pct', 'MLDO_model_pct', 'MLDO_diff_pts', 'P_MLDO_exp_psi', ...
+        'P_MLDO_model_psi', 'nCCEFailures', 'Branch'});
+    W = convertvars(W, {'Fluid', 'Mixture', 'Branch'}, 'string');
+    writetable(W, fullfile(cfg.outDir, "mldo_bip_sweep.csv"));
+
+    % Per BIP value: RMS Pdew error over the binaries and over all fluids, MAE of MLDO
+    vals = cfg.bipSweep.values(:);
+    isBin = W.Mixture == strjoin(pr, "-");
+    [rmsBin, rmsAll, maeM] = deal(nan(numel(vals), 1));
+    for k = 1:numel(vals)
+        s = abs(W.BIP - vals(k)) < 1e-12;
+        rmsBin(k) = sqrt(mean(W.Pdew_err_pct(s & isBin).^2, 'omitnan'));
+        rmsAll(k) = sqrt(mean(W.Pdew_err_pct(s).^2, 'omitnan'));
+        maeM(k)   = mean(abs(W.MLDO_diff_pts(s & W.nCCEFailures == 0)), 'omitnan');
+    end
+    WS = table(vals, rmsBin, rmsAll, maeM, 'VariableNames', {'BIP', 'RMS_Pdew_err_binaries_pct', ...
+        'RMS_Pdew_err_all_pct', 'MAE_MLDO_pts'});
+    disp(WS);
+    writetable(WS, fullfile(cfg.outDir, "mldo_bip_sweep_summary.csv"));
+
+    figure('Name', 'BIP sweep', 'Position', [80 80 1100 420]);
+    tiledlayout(1, 2, 'TileSpacing', 'compact');
+    fl_ = unique(W.Fluid, 'stable');
+    nexttile; hold on; box on;
+    for f = fl_.'
+        s = W.Fluid == f;  plot(W.BIP(s), W.Pdew_err_pct(s), 'o-', 'DisplayName', f);
+    end
+    yline(0, 'k:', 'HandleVisibility', 'off');
+    yline([-1 1], 'k--', 'HandleVisibility', 'off');
+    xlabel("BIP " + pr(1) + "-" + pr(2)); ylabel('Bulk P_{dew} error [%]'); legend('Location', 'best');
+    title('Bulk dew point (nominal compositions)');
+    nexttile; hold on; box on;
+    for f = fl_.'
+        s = W.Fluid == f;  plot(W.BIP(s), W.MLDO_diff_pts(s), 'o-', 'DisplayName', f);
+    end
+    yline(0, 'k:', 'HandleVisibility', 'off');
+    xlabel("BIP " + pr(1) + "-" + pr(2)); ylabel('MLDO model - measured [points]'); legend('Location', 'best');
+    title('Maximum liquid dropout');
+    exportgraphics(gcf, fullfile(cfg.outDir, "mldo_bip_sweep.png"), 'Resolution', 200);
+end
+
 %% Local functions ----------------------------------------------------------------------------
+function fl = localSetBIP(fl, pair, value)
+    K = fl.BIPMatrix;
+    a = fl.componentIndex(pair(1));  b = fl.componentIndex(pair(2));
+    K(a, b) = value;  K(b, a) = value;
+    fl = entities.FluidProperties(fl.ComponentNames, fl.Tc, fl.Pc, fl.omega, fl.MW, fl.Vc, ...
+        fl.Parachor, fl.ZRackett, fl.VolumeShift, fl.LJ_Size, fl.LJ_Energy, K);
+end
+
 function z = localParseZ(s)
     z = str2double(split(erase(string(s), ["[", "]", " "]), ","));
     z = z(:) / sum(z);

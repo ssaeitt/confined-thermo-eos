@@ -2,8 +2,18 @@ classdef PTFlash < handle
     % PTFLASH Isothermal two-phase (VL) PT flash for confined mixtures, FWI-only.
     %
     % Sequence: PhaseStability (two-sided TPD) -> successive substitution on
-    % ln K with a bounded Rachford-Rice solve -> Newton on ln K (central-
-    % difference Jacobian, Armijo line search) -> acceptance checks.
+    % ln K with a bounded Rachford-Rice solve, accelerated by dominant-eigenvalue
+    % extrapolation (GDEM) -> Newton on ln K (central-difference Jacobian,
+    % non-monotone line search that keeps 0 < beta < 1) -> acceptance checks.
+    %
+    % Near-critical robustness (needed for F5/F8-type condensates):
+    %   - starting K: the caller's K_seed first (warm start from the neighbouring
+    %     pressure), then the stability-test K;
+    %   - the SS -> Newton switch uses the estimated DISTANCE to the fixed point,
+    %     err/(1 - err/err_prev), not the last step size (SS steps are tiny but the
+    %     solution is far when the dominant eigenvalue is close to 1);
+    %   - if every start fails, pressure continuation from below: solve at a
+    %     slightly lower pressure (easy) and march back up to P with warm starts.
     %
     %   Unknowns   ln K_i,      K_i = y_i / x_i
     %   Residual   F_i = ln K_i - [ln phi_i^L(x, P) - ln phi_i^V(y, P)]
@@ -24,8 +34,12 @@ classdef PTFlash < handle
         EOS       thermo.ConfinedEOS
         Stability solvers.PhaseStability
 
-        SSMaxIterations (1,1) double {mustBeInteger, mustBePositive} = 300
-        SwitchTol       (1,1) double {mustBePositive} = 1e-5    % SS -> Newton when max|d ln K| < SwitchTol
+        SSMaxIterations (1,1) double {mustBeInteger, mustBePositive} = 3000
+        SwitchTol       (1,1) double {mustBePositive} = 1e-6    % SS -> Newton when the estimated distance < SwitchTol
+        GDEMInterval    (1,1) double {mustBeInteger, mustBePositive} = 5
+        GDEMMaxStep     (1,1) double {mustBePositive} = 0.1     % max |d ln K| of one extrapolation
+        ContinuationDrops (1,:) double = [0.03 0.08 0.15]       % fractional pressure drops tried
+        ContinuationSteps (1,1) double {mustBeInteger, mustBePositive} = 6
         MaxIterations   (1,1) double {mustBeInteger, mustBePositive} = 60
         Tolerance       (1,1) double {mustBePositive} = 1e-11   % ||F||_inf
         JacEpsilon      (1,1) double {mustBePositive} = 1e-6
@@ -43,6 +57,10 @@ classdef PTFlash < handle
                 opts.Stability solvers.PhaseStability = solvers.PhaseStability.empty
                 opts.SSMaxIterations (1,1) double
                 opts.SwitchTol       (1,1) double
+                opts.GDEMInterval    (1,1) double
+                opts.GDEMMaxStep     (1,1) double
+                opts.ContinuationDrops (1,:) double
+                opts.ContinuationSteps (1,1) double
                 opts.MaxIterations   (1,1) double
                 opts.Tolerance       (1,1) double
                 opts.JacEpsilon      (1,1) double
@@ -74,6 +92,7 @@ classdef PTFlash < handle
             %               also passed to the stability test as an extra seed).
             % opts.SkipStability : trust K_seed and go straight to the split
             %               (only for marching along a known two-phase path).
+            % opts.Continuation : allow the pressure-continuation fallback.
             arguments
                 obj
                 P     (1,1) double {mustBePositive}
@@ -82,6 +101,7 @@ classdef PTFlash < handle
                 r_cap (1,1) double {mustBePositive}
                 opts.K_seed double = []
                 opts.SkipStability (1,1) logical = false
+                opts.Continuation  (1,1) logical = true
             end
             nc = obj.EOS.Fluid.NC;
             if numel(z) ~= nc
@@ -90,56 +110,71 @@ classdef PTFlash < handle
             z = max(z, 1e-20);
             z = z / sum(z);
             Kseed = opts.K_seed(:);
+            if ~isempty(Kseed) && (numel(Kseed) ~= nc || any(~isfinite(Kseed)) || any(Kseed <= 0))
+                Kseed = [];
+            end
 
             % ---------- 1. Stability ----------
-            st = struct('isUnstable', true, 'tpd', NaN, 'trialType', "seed");
-            if opts.SkipStability && ~isempty(Kseed)
-                K0 = Kseed;
-            else
+            st = struct('isUnstable', true, 'tpd', NaN, 'trialType', "seed", 'K', Kseed);
+            if ~(opts.SkipStability && ~isempty(Kseed))
                 st = obj.Stability.test(P, T, z, r_cap, 'ExtraK', Kseed);
                 if ~st.isUnstable
                     res = obj.singlePhase(P, T, z, r_cap, "stable", st);
                     return;
                 end
-                K0 = st.K;
             end
 
-            % ---------- 2. Successive substitution ----------
-            lnK = log(max(K0, 1e-300));
-            reason = "ss-max-iterations";
-            itSS = 0;
-            try
-                for itSS = 1:obj.SSMaxIterations
-                    [lnKnew, ~] = obj.update(lnK, P, T, z, r_cap);
-                    err = max(abs(lnKnew - lnK));
-                    lnK = lnKnew;
-                    if norm(lnK) < obj.TrivialTol
-                        reason = "trivial";
-                        break;
-                    end
-                    if err < obj.SwitchTol
-                        reason = "switch";
-                        break;
-                    end
-                end
-            catch ME
-                if ~obj.isRecoverable(ME), rethrow(ME); end
-                reason = "model-failure-ss";
+            % ---------- 2. Two-phase split from each start ----------
+            starts = {};
+            if ~isempty(Kseed), starts{end+1} = {"seed", Kseed}; end
+            if isfield(st, 'K') && ~isempty(st.K) && all(isfinite(st.K)) && ...
+                    ~(numel(starts) == 1 && isequal(st.K(:), Kseed))
+                starts{end+1} = {"tpd", st.K(:)};
             end
-            if reason == "trivial" || reason == "model-failure-ss"
-                res = obj.singlePhase(P, T, z, r_cap, reason, st);
+            res = [];
+            for k = 1:numel(starts)
+                r = obj.attempt(log(max(starts{k}{2}, 1e-300)), P, T, z, r_cap, st);
+                r.start = starts{k}{1};
+                if r.converged && r.phases == 2
+                    res = r;
+                    return;
+                end
+                if isempty(res), res = r; end
+            end
+            if isempty(res)
+                res = obj.singlePhase(P, T, z, r_cap, "no-start", st);
+                res.converged = false;
+            end
+
+            % ---------- 3. Pressure continuation from below ----------
+            % The feed is unstable here, so anything short of an accepted two-phase
+            % split (including a collapse to a single phase) triggers the fallback.
+            if opts.Continuation
+                rc = obj.continuation(P, T, z, r_cap, st);
+                if ~isempty(rc)
+                    res = rc;
+                end
+            end
+        end
+    end
+
+    methods (Access = private)
+        function res = attempt(obj, lnK, P, T, z, r_cap, st)
+            % SS (accelerated) -> Newton -> acceptance from one starting ln K.
+            [lnK, ssReason, itSS] = obj.successiveSubstitution(lnK, P, T, z, r_cap);
+            if ssReason == "trivial" || ssReason == "model-failure-ss"
+                res = obj.singlePhase(P, T, z, r_cap, ssReason, st);
+                res.iterationsSS = itSS;
+                res.start = "";
                 return;
             end
-
-            % ---------- 3. Newton on ln K ----------
             [lnK, nIt, nReason] = obj.newton(lnK, P, T, z, r_cap);
-
-            % ---------- 4. Acceptance ----------
             res = obj.package(lnK, P, T, z, r_cap, st);
             res.iterationsSS = itSS;
             res.iterationsNewton = nIt;
             res.reason = nReason;
             res.converged = nReason == "converged";
+            res.start = "";
             if ~res.converged
                 return;
             end
@@ -150,10 +185,80 @@ classdef PTFlash < handle
             elseif res.dG >= -obj.GibbsTol
                 res = obj.singlePhase(P, T, z, r_cap, "gibbs-rejected", st);
             end
+            res.start = "";
         end
-    end
 
-    methods (Access = private)
+        function [lnK, reason, it] = successiveSubstitution(obj, lnK, P, T, z, r_cap)
+            reason = "ss-max-iterations";
+            it = 0;
+            dPrev = [];  errPrev = [];
+            try
+                for it = 1:obj.SSMaxIterations
+                    [lnKnew, ~] = obj.update(lnK, P, T, z, r_cap);
+                    d   = lnKnew - lnK;
+                    err = max(abs(d));
+                    est = err;                                   % distance estimate
+                    if ~isempty(errPrev) && err < errPrev
+                        est = err / (1 - err / errPrev);
+                    end
+                    lnK = lnKnew;
+                    if norm(lnK) < obj.TrivialTol
+                        reason = "trivial";
+                        return;
+                    end
+                    if it >= 3 && est < obj.SwitchTol
+                        reason = "switch";
+                        return;
+                    end
+                    % GDEM (dominant eigenvalue) extrapolation, kept inside 0 < beta < 1
+                    if mod(it, obj.GDEMInterval) == 0 && ~isempty(dPrev)
+                        den = dPrev.' * d;
+                        if abs(den) > 0
+                            lam = (d.' * d) / den;
+                            if lam > 0 && lam < 1
+                                step = d * lam / (1 - lam);
+                                sMax = max(abs(step));
+                                if sMax > obj.GDEMMaxStep
+                                    step = step * (obj.GDEMMaxStep / sMax);
+                                end
+                                bt = solvers.PTFlash.rachfordRice(z, exp(lnK + step));
+                                if bt > 0 && bt < 1
+                                    lnK = lnK + step;
+                                end
+                            end
+                        end
+                    end
+                    dPrev = d;  errPrev = err;
+                end
+            catch ME
+                if ~obj.isRecoverable(ME), rethrow(ME); end
+                reason = "model-failure-ss";
+            end
+        end
+
+        function res = continuation(obj, P, T, z, r_cap, st)
+            % Solve at P(1 - drop) without a seed, then march up to P with warm starts.
+            res = [];
+            for drop = obj.ContinuationDrops
+                Ps = P * (1 - drop);
+                rs = obj.solve(Ps, T, z, r_cap, 'Continuation', false);
+                if ~(rs.converged && rs.phases == 2), continue; end
+                K = rs.K;  ok = true;
+                for Pm = linspace(Ps, P, obj.ContinuationSteps + 1)
+                    if Pm == Ps, continue; end
+                    rm = obj.solve(Pm, T, z, r_cap, 'K_seed', K, 'Continuation', false);
+                    if ~rm.converged, ok = false; break; end
+                    if rm.phases == 2, K = rm.K; end
+                end
+                if ok
+                    res = rm;
+                    res.start = "continuation";
+                    if res.phases == 2 && isfinite(st.tpd), res.tpd = st.tpd; end
+                    return;
+                end
+            end
+        end
+
         function [lnKnew, s] = update(obj, lnK, P, T, z, r_cap)
             K = exp(lnK);
             beta = solvers.PTFlash.rachfordRice(z, K);
@@ -165,11 +270,13 @@ classdef PTFlash < handle
                        'ZL', ZL, 'ZV', ZV, 'VL', VL, 'VV', VV);
         end
 
-        function [F, ok] = residual(obj, lnK, P, T, z, r_cap)
+        function [F, ok, beta] = residual(obj, lnK, P, T, z, r_cap)
+            beta = NaN;
             try
-                [lnKnew, ~] = obj.update(lnK, P, T, z, r_cap);
+                [lnKnew, s] = obj.update(lnK, P, T, z, r_cap);
                 F = lnK - lnKnew;
                 ok = all(isfinite(F));
+                beta = s.beta;
             catch ME
                 if ~obj.isRecoverable(ME), rethrow(ME); end
                 F = [];  ok = false;
@@ -220,8 +327,9 @@ classdef PTFlash < handle
                 alpha = 1.0;
                 accepted = false;
                 for ls = 1:obj.MaxLineSearch
-                    [Ft, okt] = obj.residual(lnK + alpha * d, P, T, z, r_cap);
-                    if okt && 0.5 * (Ft.' * Ft) <= (1 - 2 * obj.LineSearchC1 * alpha) * fRef
+                    [Ft, okt, bt] = obj.residual(lnK + alpha * d, P, T, z, r_cap);
+                    if okt && bt > 0 && bt < 1 && ...
+                            0.5 * (Ft.' * Ft) <= (1 - 2 * obj.LineSearchC1 * alpha) * fRef
                         accepted = true;
                         break;
                     end
@@ -270,7 +378,7 @@ classdef PTFlash < handle
                 'V_total', volL + volV, ...                      % [m^3 per mol feed]
                 'SL', volL / (volL + volV), ...                  % liquid volume fraction
                 'dG', dG, 'tpd', st.tpd, 'trialType', st.trialType, ...
-                'label', "two-phase", 'iterationsSS', 0, 'iterationsNewton', 0);
+                'label', "two-phase", 'iterationsSS', 0, 'iterationsNewton', 0, 'start', "");
         end
 
         function res = singlePhase(obj, P, T, z, r_cap, reason, st)
@@ -286,7 +394,7 @@ classdef PTFlash < handle
                 'rhoM_L', 1e-3 * (z.' * MW) / V, 'rhoM_V', 1e-3 * (z.' * MW) / V, ...
                 'V_total', V, 'SL', double(~isV), ...
                 'dG', 0.0, 'tpd', st.tpd, 'trialType', st.trialType, ...
-                'label', label, 'iterationsSS', 0, 'iterationsNewton', 0);
+                'label', label, 'iterationsSS', 0, 'iterationsNewton', 0, 'start', "");
         end
 
         function label = singlePhaseLabel(obj, T, z)

@@ -60,8 +60,17 @@ classdef PVTExperiments < handle
                     continue;                                   % row stays NaN, reason kept
                 end
                 Vrel(i) = r.V_total / Vsat;
-                SL(i)   = r.SL;
-                beta(i) = r.beta;
+                if r.phases == 1
+                    % Single phase: by definition no dropout for a dew-point fluid and a
+                    % full liquid for a bubble-point fluid. The PTFlash label (bulk
+                    % pseudo-critical T) is not used: it calls near-critical
+                    % condensates (e.g. F5) "liquid" and gave 100 % dropout at Psat.
+                    SL(i)   = double(opts.SatType == "bubble");
+                    beta(i) = 1 - SL(i);
+                else
+                    SL(i)   = r.SL;
+                    beta(i) = r.beta;
+                end
                 rhoL(i) = r.rhoM_L;  rhoV(i) = r.rhoM_V;
                 if r.phases == 2, K = r.K; end
             end
@@ -112,7 +121,7 @@ classdef PVTExperiments < handle
                     dn = max(Vt - Vcell, 0) / r.V_total;
                     nTot = nTot - dn;
                     cumGas = cumGas + dn;
-                    SL(i) = double(r.label == "liquid");
+                    SL(i) = 0;                                  % dew-point fluid: single phase = no dropout
                     compositions(i) = struct('P', Plist(i), 'z', zCur, 'x', zCur, 'y', zCur);
                 else
                     K  = r.K;
