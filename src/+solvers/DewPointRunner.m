@@ -17,6 +17,7 @@ classdef DewPointRunner < handle
         Warm         containers.Map        % "<key>" -> struct(P, K, Pcap)
         BulkP        containers.Map        % "mixture|rock|z" -> Pa
         BulkK        containers.Map
+        FWI          double = []           % [k, p, lambda] from setFWI; applied to engines created later
     end
 
     properties (Access = public)
@@ -59,6 +60,9 @@ classdef DewPointRunner < handle
                 fl  = entities.FluidProperties.loadFromWorkbook(obj.WorkbookFile, string(mixture));
                 rk  = entities.RockProperties.loadFromWorkbook(obj.WorkbookFile, string(rock));
                 eos = thermo.ConfinedEOS(fl, rk);
+                if ~isempty(obj.FWI)              % engines created after setFWI get the same values
+                    eos.k = obj.FWI(1);  eos.pT_wall = obj.FWI(2);  eos.lambda = obj.FWI(3);
+                end
                 st  = solvers.StabilityTester(eos);
                 fe  = solvers.FlashEngine(eos, st, 'Tolerance', obj.FlashTolerance);
                 obj.Engines(key) = struct('eos', eos, 'stab', st, 'flash', fe);
@@ -67,7 +71,9 @@ classdef DewPointRunner < handle
         end
 
         function setFWI(obj, k, p, lambda)
-            % V31 ordering [k, p, lambda] -> ConfinedEOS properties, all engines.
+            % V31 ordering [k, p, lambda] -> ConfinedEOS properties, all engines,
+            % including engines created afterwards.
+            obj.FWI = [k, p, lambda];
             ev = values(obj.Engines);
             for n = 1:numel(ev)
                 ev{n}.eos.k = k;  ev{n}.eos.pT_wall = p;  ev{n}.eos.lambda = lambda;
@@ -82,7 +88,8 @@ classdef DewPointRunner < handle
         function [P, K, ok] = bulk(obj, c)
             % Bulk (r = Inf) dew point and K for a case; cached. c from
             % entities.DewPointDataset.getCase.
-            key = char(c.Mixture + "|" + c.Rock + "|" + strjoin(string(c.z.'), ","));
+            key = char(c.Mixture + "|" + c.Rock + "|" + strjoin(string(c.z.'), ",") + ...
+                       "|T" + string(c.T));             % T in the key: no cross-temperature reuse
             if isKey(obj.BulkP, key)
                 P = obj.BulkP(key);  K = obj.BulkK(key);  ok = isfinite(P);
                 return;
@@ -120,7 +127,8 @@ classdef DewPointRunner < handle
             bulkRef = Pb;
             if ~okb, bulkRef = c.PdewBulk;  Kb = []; end
             key = opts.Key;
-            if key == "", key = c.Mixture + "|" + c.Rock + "|" + strjoin(string(c.z.'), ",") + "|" + mode; end
+            if key == "", key = c.Mixture + "|" + c.Rock + "|" + strjoin(string(c.z.'), ",") + ...
+                                "|T" + string(c.T) + "|" + mode; end
 
             [P, Pcap, ok, info] = obj.solveConfined(eng, c, r, mode, char(key), ...
                                                     struct('P', bulkRef, 'K', Kb));

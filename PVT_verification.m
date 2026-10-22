@@ -1,13 +1,8 @@
 %% PVT_VERIFICATION  Verify the general-purpose PVT solvers against the frozen
 %  dew-point machinery and export the simulator EOS (FWI-only).
 %
-%  Frozen model (no placeholders; values as in TIP_correlation.m / Baclcalc_rp_B1_late.m):
-%    preset jL (primary)    : joint-Linearized k, p, lambda; TIP form LL-inv_wbar
-%    preset w1 (sensitivity): pareto-exact-w1 k, p, lambda; TIP form LL-Tstar
-%    TIP_ij = -exp(alpha_rock + B * x_ij), rock-offset, size-independent.
-%    alpha_EF2, alpha_B1, B are re-derived here by the SAME least-squares fit as
-%    TIP_correlation.m (fitForm) from the frozen per-group optimised TIPs, using the
-%    component properties of the workbook. No TIP workbook is needed.
+%  Frozen model: thermo.RockOffsetTIP (single source of k, p, lambda, the per-group
+%  TIPs and the rock-offset correlation fit; presets jL = primary, w1 = sensitivity).
 %
 %  Checks, per HC case with confined data (CO2 mixtures excluded), at every pore
 %  radius assigned to the case (late B1 core: nominal AND back-calculated):
@@ -19,8 +14,10 @@
 %   B   bulk and confined bubble points of liquid-rich feeds (+ flash check).
 %       The SIGN of the confined bubble-point shift is a model prediction (the
 %       model is calibrated on dew points only); it is reported, never imposed.
-%   C   CCE / CVD, bulk vs confined, for one case
-%   E   simulator EOS export (ECLIPSE 300 / CMG GEM templates + CSV)
+%   C   CCE / CVD, bulk vs confined, for the cases in cfg.pvtCases; dropout also on
+%       the laboratory basis (vol% of V_sat) with MLDO vs the measured bulk MLDO
+%   E   simulator EOS export (ECLIPSE 300 / CMG GEM templates + CSV), including a
+%       bulk region (r_p = Inf) per component set for fractures / dead volume
 %
 %  Needs (local, not in the repository): config/MixtureData - Complete Mixtures.xlsx
 %  Nothing in this script fits model parameters to data.
@@ -41,17 +38,6 @@ cfg.poreRadius  = containers.Map({'EF2', 'B1'}, {54e-9, 11.25e-9});   % nominal 
 
 % --- Frozen model ---------------------------------------------------------------
 cfg.preset = "jL";                     % "jL" (primary) | "w1" (sensitivity)
-presets.jL = struct('combination', "joint-linearized", ...
-    'k', 112.42634826677, 'p', 1.3558179290678, 'lambda', 2.0916235090532, ...
-    'descriptor', "inv_wbar", 'form', "LL-inv_wbar", ...
-    'tipGroups', [-4.9229696302796, -1.96920366521686, -1.44628069292089, -0.754862049795788]);
-presets.w1 = struct('combination', "pareto-exact-w1", ...
-    'k', 166.410386, 'p', 1.548842, 'lambda', 4.479082, ...    % as in TIP_correlation.m cfg.combos
-    'descriptor', "Tstar", 'form', "LL-Tstar", ...
-    'tipGroups', [-7.012375, -2.883946, -2.124570, -1.168401]);
-% Groups of the per-group optimised TIPs, in the order of tipGroups (FWI-Only)
-cfg.tipGroups = ["C1-nC5|EF2", "C1-nC8|EF2", "C1-nC10|EF2", "C1-nC8|B1"];
-ps = presets.(cfg.preset);
 
 % Late B1 core, C1-nC8 [0.9, 0.1]: nominal AND back-calculated radii (band edges kept
 % for reference). Values from co2_pipeline_v3.m (rpManual, jL).
@@ -64,8 +50,10 @@ cfg.lateRadiiToRun = ["nominal", "backcalc"];     % add "backcalc_lo", "backcalc
 cfg.bubble = struct('Mixture', {"C1-nC10", "C1-nC8"}, 'z', {[0.5; 0.5], [0.5; 0.5]}, ...
                     'P_guess_psi', {2500, 2500});
 
-% CCE / CVD case (row index into Mix_Props; [] = first HC case with confined data)
-cfg.pvtCaseIndex = [];
+% CCE / CVD cases: rows of Mix_Props by Fluid_ID and rock (late B1 core: both radii)
+cfg.pvtCases = struct('Fluid', {"F2", "F7", "F8", "F5"}, 'Rock', {"EF2", "B1", "B1", "EF2"}, ...
+                      'Campaign', {"early", "early", "late", "early"});
+cfg.PminFrac = 0.10;               % CCE/CVD down to 10 % of Psat
 
 % Tolerances
 cfg.tol.dP_psi  = 0.01;            % V1/V2 agreement
@@ -84,13 +72,13 @@ isHC = ~contains(dp.Mixture, "CO2");
 idx  = find(dp.HasConfined & isHC).';
 runner = solvers.DewPointRunner(cfg.mixtureFile, cfg.poreRadius);
 for i = idx, runner.engine(dp.Mixture(i), dp.Rock(i)); end
-runner.setFWI(ps.k, ps.p, ps.lambda);
+mpRaw = readtable(cfg.mixtureFile, 'Sheet', 'Mix_Props', 'VariableNamingRule', 'preserve');
+hasMLDO = all(ismember(["Fluid_ID", "Campaign", "MLDO_pct", "P_MLDO_psi"], string(mpRaw.Properties.VariableNames)));
 
-tip = localFitTIP(cfg, ps, runner);
-fprintf('Model %s (%s): k = %.6f, p = %.6f, lambda = %.6f\n', cfg.preset, ps.combination, ps.k, ps.p, ps.lambda);
-fprintf('TIP %s: alpha_EF2 = %+.6f, alpha_B1 = %+.6f, B = %+.6f (refit RMSE ln, EF2 = %.4f)\n\n', ...
-        ps.form, tip.alphaEF2, tip.alphaB1, tip.B, tip.rmseLnEF2);
-kijcFor = @(c, eos) localTIPMatrix(eos.Fluid, c.Rock, c.T, ps.descriptor, tip, cfg.kB);
+tip = thermo.RockOffsetTIP.frozen(cfg.preset, cfg.mixtureFile);
+fprintf('%s\n\n', tip.summary());
+runner.setFWI(tip.k, tip.p, tip.lambda);
+kijcFor = @(c, eos) tip.matrix(eos.Fluid, c.Rock, c.T);
 
 %% 2. V1-V4 per case and radius ------------------------------------------------------
 rows = {};
@@ -179,42 +167,84 @@ if ~isempty(bubRows)
 end
 
 %% 4. C: CCE / CVD, bulk vs confined ----------------------------------------------------------
-pvtIdx = cfg.pvtCaseIndex;
-if isempty(pvtIdx), pvtIdx = idx(1); end
-c   = dp.getCase(pvtIdx);
-[radii, ~] = localRadii(cfg, c);
-r   = radii(1);
-eng = runner.engine(c.Mixture, c.Rock);
-ref = runner.solve(c, "FWIOnly", kijcFor(c, eng.eos), 'r', r);
-if ref.ok
-    pt  = solvers.PTFlash(eng.eos);
-    pvt = solvers.PVTExperiments(pt);
-    Pb  = ref.PdewBulkModel;
-    Plist_b = linspace(0.98, 0.15, 25).' * Pb;
-    Plist_c = linspace(0.98, 0.15, 25).' * ref.P;
-    [cvdB, ~] = pvt.cvd(c.T, c.z, Inf, Pb, Plist_b);
-    [cvdC, ~] = pvt.cvd(c.T, c.z, r,   ref.P, Plist_c);
-    cceB = pvt.cce(c.T, c.z, Inf, Pb, [1.2 * Pb; Plist_b]);
-    cceC = pvt.cce(c.T, c.z, r,   ref.P, [1.2 * ref.P; Plist_c]);
-    writetable(cvdB, fullfile(cfg.outDir, "cvd_bulk.csv"));
-    writetable(cvdC, fullfile(cfg.outDir, "cvd_confined.csv"));
-    writetable(cceB, fullfile(cfg.outDir, "cce_bulk.csv"));
-    writetable(cceC, fullfile(cfg.outDir, "cce_confined.csv"));
+% Dropout on the laboratory basis (vol% of V_sat); MLDO compared with the measured BULK
+% MLDO (confined MLDO has not been measured). Psat values are the model dew points.
+if ~hasMLDO
+    warning('verify:NoMLDO', 'Mix_Props has no Fluid_ID/MLDO columns: CCE/CVD skipped.');
+    cfg.pvtCases = cfg.pvtCases([]);
+end
+mldoRows = {};
+for pc = cfg.pvtCases
+    sel = find(string(mpRaw.Fluid_ID) == pc.Fluid & string(mpRaw.Rock) == pc.Rock & ...
+               string(mpRaw.Campaign) == pc.Campaign, 1);
+    if isempty(sel)
+        warning('verify:PVTCase', 'No Mix_Props row for %s on %s (%s).', pc.Fluid, pc.Rock, pc.Campaign);
+        continue;
+    end
+    c = dp.getCase(sel);                         % Mix_Props and dp share row order
+    [radii, rLabels] = localRadii(cfg, c);
+    eng = runner.engine(c.Mixture, c.Rock);
+    pvt = solvers.PVTExperiments(solvers.PTFlash(eng.eos));
+    stem = sprintf('%s_%s', pc.Fluid, pc.Rock);
+    if pc.Campaign == "late", stem = stem + "_late"; end
 
-    figure('Name', 'Liquid dropout');
-    tiledlayout(1, 2);
+    curves = {};
+    for q = 1:numel(radii)
+        ref = runner.solve(c, "FWIOnly", kijcFor(c, eng.eos), 'r', radii(q));
+        if ~ref.ok
+            warning('verify:PVTCase', '%s r_p %s: reference dew point failed (%s).', stem, rLabels(q), ref.reason);
+            continue;
+        end
+        if q == 1                                % bulk once per case
+            Pb = ref.PdewBulkModel;
+            Pl = solvers.PVTExperiments.pressureGrid(Pb, cfg.PminFrac * Pb, 40);
+            cceB = pvt.cce(c.T, c.z, Inf, Pb, [1.05 * Pb; Pl]);
+            [cvdB, ~] = pvt.cvd(c.T, c.z, Inf, Pb, Pl);
+            writetable(cceB, fullfile(cfg.outDir, "cce_" + stem + "_bulk.csv"));
+            writetable(cvdB, fullfile(cfg.outDir, "cvd_" + stem + "_bulk.csv"));
+            [m, pm] = solvers.PVTExperiments.mldo(cceB);
+            mldoRows(end+1, :) = {pc.Fluid, pc.Rock, pc.Campaign, "bulk", Inf, Pb / psi, m, pm, ...
+                                  mpRaw.MLDO_pct(sel), mpRaw.P_MLDO_psi(sel)}; %#ok<AGROW>
+            curves(end+1, :) = {"bulk", cceB, cvdB}; %#ok<AGROW>
+        end
+        Pl = solvers.PVTExperiments.pressureGrid(ref.P, cfg.PminFrac * ref.P, 40);
+        cceC = pvt.cce(c.T, c.z, radii(q), ref.P, [1.05 * ref.P; Pl]);
+        [cvdC, ~] = pvt.cvd(c.T, c.z, radii(q), ref.P, Pl);
+        tagR = sprintf('r%.2fnm', radii(q) * 1e9);
+        writetable(cceC, fullfile(cfg.outDir, "cce_" + stem + "_" + tagR + ".csv"));
+        writetable(cvdC, fullfile(cfg.outDir, "cvd_" + stem + "_" + tagR + ".csv"));
+        [m, pm] = solvers.PVTExperiments.mldo(cceC);
+        mldoRows(end+1, :) = {pc.Fluid, pc.Rock, pc.Campaign, "confined " + rLabels(q), radii(q) * 1e9, ...
+                              ref.P / psi, m, pm, mpRaw.MLDO_pct(sel), mpRaw.P_MLDO_psi(sel)}; %#ok<AGROW>
+        curves(end+1, :) = {sprintf('confined, r_p = %.2f nm', radii(q) * 1e9), cceC, cvdC}; %#ok<AGROW>
+    end
+    if isempty(curves), continue; end
+
+    figure('Name', "Liquid dropout " + stem, 'Position', [60 60 1150 430]);
+    tiledlayout(1, 2, 'TileSpacing', 'compact');
     nexttile; hold on; box on;
-    plot(cceB.P_psi, 100 * cceB.SL, 'o-', 'DisplayName', 'bulk');
-    plot(cceC.P_psi, 100 * cceC.SL, 's-', 'DisplayName', sprintf('confined, r_p = %.2f nm', r * 1e9));
-    xlabel('P [psi]'); ylabel('Liquid dropout, CCE [% of V_{total}]'); legend('Location', 'best');
-    title(sprintf('%s, %s, z_1 = %.3f', c.Mixture, c.Rock, c.z(1)));
+    for k = 1:size(curves, 1)
+        plot(curves{k, 2}.P_psi, curves{k, 2}.LDO_pct_Vsat, '.-', 'DisplayName', curves{k, 1});
+    end
+    if isfinite(mpRaw.MLDO_pct(sel)) && isfinite(mpRaw.P_MLDO_psi(sel))
+        plot(mpRaw.P_MLDO_psi(sel), mpRaw.MLDO_pct(sel), 'kp', 'MarkerSize', 12, 'MarkerFaceColor', 'k', ...
+             'DisplayName', 'measured bulk MLDO');
+    end
+    xlabel('P [psi]'); ylabel('CCE liquid dropout [% of V_{sat}]'); legend('Location', 'best');
+    title(sprintf('%s (%s, z_1 = %.4f), %s', pc.Fluid, c.Mixture, c.z(1), c.Rock));
     nexttile; hold on; box on;
-    plot(cvdB.P_psi, 100 * cvdB.SL_cell, 'o-', 'DisplayName', 'bulk');
-    plot(cvdC.P_psi, 100 * cvdC.SL_cell, 's-', 'DisplayName', 'confined');
-    xlabel('P [psi]'); ylabel('Liquid dropout, CVD [% of V_{cell}]'); legend('Location', 'best');
-    exportgraphics(gcf, fullfile(cfg.outDir, "dropout_bulk_vs_confined.png"), 'Resolution', 200);
-else
-    warning('verify:PVTCase', 'CCE/CVD skipped: reference dew point failed (%s).', ref.reason);
+    for k = 1:size(curves, 1)
+        plot(curves{k, 3}.P_psi, 100 * curves{k, 3}.SL_cell, '.-', 'DisplayName', curves{k, 1});
+    end
+    xlabel('P [psi]'); ylabel('CVD liquid dropout [% of V_{cell}]'); legend('Location', 'best');
+    exportgraphics(gcf, fullfile(cfg.outDir, "dropout_" + stem + ".png"), 'Resolution', 200);
+end
+if ~isempty(mldoRows)
+    M = cell2table(mldoRows, 'VariableNames', {'Fluid', 'Rock', 'Campaign', 'State', 'rp_nm', ...
+        'Psat_model_psi', 'MLDO_model_pct', 'P_MLDO_model_psi', 'MLDO_exp_bulk_pct', 'P_MLDO_exp_bulk_psi'});
+    M = convertvars(M, {'Fluid', 'Rock', 'Campaign', 'State'}, 'string');
+    disp(M);
+    writetable(M, fullfile(cfg.outDir, "mldo_" + cfg.preset + ".csv"));
 end
 
 %% 5. E: simulator EOS export ------------------------------------------------------------------
@@ -232,6 +262,9 @@ if ~isempty(eqRegions)
         inSet = find(sets == setName);
         [~, keep] = unique(labels(inSet), 'stable');      % one region per rock and r_p
         grp = eqRegions(inSet(keep));
+        % Bulk region (r_p = Inf): standard PR with the workbook BIPs, listed first
+        eosB = runner.engine(strjoin(grp(1).ComponentNames, "-"), cfg.lateCase.Rock).eos;
+        grp  = [thermo.EquivalentPR.fromEOS(eosB, cfg.T, Inf, "bulk-" + setName), grp]; %#ok<AGROW>
         thermo.EquivalentPR.writeE300(grp, fullfile(expDir, setName + "_E300_PROPS.inc"));
         thermo.EquivalentPR.writeGEM(grp,  fullfile(expDir, setName + "_GEM_EOS.inc"));
         for k = 1:numel(grp)
@@ -256,55 +289,6 @@ function [radii, labels] = localRadii(cfg, c)
     else
         labels = "nominal";
         radii  = cfg.poreRadius(char(c.Rock));
-    end
-end
-
-function tip = localFitTIP(cfg, ps, runner)
-    % Same fit as TIP_correlation.m (fitForm): ln(-TIP) = alpha_EF2*[EF2] + alpha_B1*[B1] + B*x
-    G = numel(cfg.tipGroups);
-    x = zeros(G, 1);  isB1 = false(G, 1);
-    for g = 1:G
-        pr  = split(cfg.tipGroups(g), "|");
-        eng = runner.engine(pr(1), pr(2));
-        X   = localDescriptor(eng.eos.Fluid, ps.descriptor, cfg.T, cfg.kB);
-        x(g) = X(1, 2);
-        isB1(g) = pr(2) == "B1";
-    end
-    y = log(-ps.tipGroups(:));
-    A = [double(~isB1), double(isB1), x];
-    if rank(A) < 3, error('verify:TIPRank', 'TIP design matrix is rank-deficient.'); end
-    par = A \ y;
-    res = A * par - y;
-    tip = struct('alphaEF2', par(1), 'alphaB1', par(2), 'B', par(3), ...
-                 'rmseLnEF2', sqrt(mean(res(~isB1).^2)), 'xCal', x);
-end
-
-function K = localTIPMatrix(fl, rock, T, descriptor, tip, kB)
-    switch string(rock)
-        case "EF2", alpha = tip.alphaEF2;
-        case "B1",  alpha = tip.alphaB1;
-        otherwise,  error('verify:Rock', 'No rock offset for %s.', rock);
-    end
-    nc = fl.NC;
-    K = -exp(alpha + tip.B * localDescriptor(fl, descriptor, T, kB));
-    K(1:nc+1:end) = 0;
-    K = (K + K.') / 2;
-end
-
-function X = localDescriptor(fl, name, T, kB)
-    % Pair descriptors, identical to TIP_correlation.m pairDescriptor (LJ_Energy in J).
-    w  = fl.omega(:);
-    e  = fl.LJ_Energy(:);
-    MW = fl.MW(:);
-    Ts = (kB * T) ./ sqrt(e * e.');
-    switch name
-        case "wbar",      X = 0.5 * (w + w.');
-        case "inv_wbar",  X = 2 ./ (w + w.');
-        case "Tstar",     X = Ts;
-        case "inv_Tstar", X = 1 ./ Ts;
-        case "ln_Tstar",  X = log(Ts);
-        case "inv_Mgeo",  X = 1 ./ sqrt(MW * MW.');
-        otherwise, error('verify:Descriptor', 'Unknown descriptor "%s".', name);
     end
 end
 

@@ -3,9 +3,13 @@ classdef PVTExperiments < handle
     % depletion (CVD) built on PTFlash, FWI-only, single pore radius.
     %
     % Volumes are Peneloux-translated molar volumes from ConfinedEOS.
-    % Liquid dropout is reported as the liquid volume fraction:
-    %   CCE : SL = V_liq / V_total(P)
-    %   CVD : SL = V_liq / V_cell     (V_cell = feed volume at P_sat)
+    % Liquid dropout is reported as:
+    %   CCE : SL          = V_liq / V_total(P)
+    %         LDO_pct_Vsat = 100 V_liq / V_sat   (laboratory basis: Doryani Table 3.4)
+    %   CVD : SL_cell     = V_liq / V_cell     (V_cell = feed volume at P_sat)
+    % PVTExperiments.mldo(tbl) returns the maximum liquid dropout and its pressure;
+    % PVTExperiments.pressureGrid(Psat, Pmin) gives a list refined just below Psat,
+    % where dropout of near-critical condensates rises almost vertically.
     %
     % Caveat for the confined model: the EOS is calibrated on Pdew only.
     % Dropout, densities and produced-gas compositions below Psat are model
@@ -61,9 +65,10 @@ classdef PVTExperiments < handle
                 rhoL(i) = r.rhoM_L;  rhoV(i) = r.rhoM_V;
                 if r.phases == 2, K = r.K; end
             end
-            tbl = table(Plist, Plist / 6894.757, phases, beta, Vrel, SL, rhoL, rhoV, reason, ...
+            LDO = 100 * SL .* Vrel;                             % vol% of V_sat
+            tbl = table(Plist, Plist / 6894.757, phases, beta, Vrel, SL, LDO, rhoL, rhoV, reason, ...
                 'VariableNames', {'P_Pa', 'P_psi', 'phases', 'beta_vapour', 'V_over_Vsat', ...
-                                  'SL', 'rhoM_L', 'rhoM_V', 'reason'});
+                                  'SL', 'LDO_pct_Vsat', 'rhoM_L', 'rhoM_V', 'reason'});
         end
 
         function [tbl, compositions] = cvd(obj, T, z, r_cap, Pdew, Plist)
@@ -133,6 +138,39 @@ classdef PVTExperiments < handle
             tbl = table(Plist, Plist / 6894.757, phases, beta, SL, gasProd, nLeft, reason, ...
                 'VariableNames', {'P_Pa', 'P_psi', 'phases', 'beta_vapour', 'SL_cell', ...
                                   'cumGasProduced_molFrac', 'molesLeft', 'reason'});
+        end
+    end
+
+    methods (Static)
+        function [mldo, P_psi] = mldo(tbl, column)
+            % Maximum liquid dropout [%] and its pressure [psi] from a cce/cvd table.
+            % column: "LDO_pct_Vsat" (CCE, default), "SL" or "SL_cell" (fractions -> %).
+            arguments
+                tbl table
+                column (1,1) string = "LDO_pct_Vsat"
+            end
+            v = tbl.(column);
+            if column ~= "LDO_pct_Vsat", v = 100 * v; end
+            [mldo, i] = max(v);
+            if isempty(i) || ~isfinite(mldo)
+                mldo = NaN;  P_psi = NaN;
+            else
+                P_psi = tbl.P_psi(i);
+            end
+        end
+
+        function P = pressureGrid(Psat, Pmin, nCoarse)
+            % Pressures [Pa], descending: Psat itself, a dense set just below it
+            % (0.01 % to 5 % below) and nCoarse evenly spaced points down to Pmin.
+            arguments
+                Psat    (1,1) double {mustBePositive}
+                Pmin    (1,1) double {mustBePositive}
+                nCoarse (1,1) double {mustBeInteger, mustBePositive} = 30
+            end
+            fine   = Psat * (1 - [0, 1e-4, 5e-4, 1e-3, 2e-3, 5e-3, 0.01, 0.02, 0.03, 0.05]);
+            coarse = linspace(0.95 * Psat, Pmin, nCoarse);
+            P = sort(unique([fine, coarse]), 'descend').';
+            P = P(P >= Pmin);
         end
     end
 end
