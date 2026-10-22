@@ -30,14 +30,22 @@ if isempty(scriptDir), scriptDir = pwd; end
 addpath(fullfile(scriptDir, "src"));
 
 %% 0. Configuration -------------------------------------------------------------
-cfg.mixtureFile = fullfile(scriptDir, "config", "MixtureData - Complete Mixtures.xlsx");
-cfg.outDir      = fullfile(scriptDir, "results", "pvt_verification");
+% --- Model variant -----------------------------------------------------------------
+%   "frozen" : current calibration (workbook "MixtureData - Complete Mixtures.xlsx", preset jL)
+%   "recal"  : C1-nC5 recalibration (workbook "MixtureData - Recalibrated.xlsx", preset jL2)
+cfg.variant = "frozen";
+variants = struct( ...
+    'frozen', struct('file', "MixtureData - Complete Mixtures.xlsx", 'preset', "jL"), ...
+    'recal',  struct('file', "MixtureData - Recalibrated.xlsx",     'preset', "jL2"));
+vsel = variants.(char(cfg.variant));
+cfg.mixtureFile = fullfile(scriptDir, "config", vsel.file);
+cfg.outDir      = fullfile(scriptDir, "results", "pvt_verification_" + cfg.variant);
 cfg.T           = 293.15;
 cfg.kB          = 1.380649e-23;                                % [J/K]
 cfg.poreRadius  = containers.Map({'EF2', 'B1'}, {54e-9, 11.25e-9});   % nominal radii [m]
 
 % --- Frozen model ---------------------------------------------------------------
-cfg.preset = "jL";                     % "jL" (primary) | "w1" (sensitivity)
+cfg.preset = vsel.preset;              % "jL" | "jL2" (from cfg.variant) | "w1" (sensitivity)
 
 % Late B1 core, C1-nC8 [0.9, 0.1]: nominal AND back-calculated radii (band edges kept
 % for reference). Values from co2_pipeline_v3.m (rpManual, jL).

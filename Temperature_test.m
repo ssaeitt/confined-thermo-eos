@@ -24,10 +24,19 @@ if isempty(scriptDir), scriptDir = pwd; end
 addpath(fullfile(scriptDir, "src"));
 
 %% 0. Configuration -------------------------------------------------------------
-cfg.mixtureFile = fullfile(scriptDir, "config", "MixtureData - Complete Mixtures.xlsx");
+% --- Model variant -----------------------------------------------------------------
+%   "frozen" : current calibration (workbook "MixtureData - Complete Mixtures.xlsx", preset jL)
+%   "recal"  : C1-nC5 recalibration (workbook "MixtureData - Recalibrated.xlsx", preset jL2)
+cfg.variant = "frozen";
+variants = struct( ...
+    'frozen', struct('file', "MixtureData - Complete Mixtures.xlsx", 'preset', "jL"), ...
+    'recal',  struct('file', "MixtureData - Recalibrated.xlsx",     'preset', "jL2"));
+vsel = variants.(char(cfg.variant));
+cfg.mixtureFile = fullfile(scriptDir, "config", vsel.file);
 cfg.sheet       = "Mix_Props_T";
-cfg.outDir      = fullfile(scriptDir, "results", "temperature_test");
-cfg.presets     = ["jL", "w1"];          % jL primary, w1 sensitivity
+cfg.outDir      = fullfile(scriptDir, "results", "temperature_test_" + cfg.variant);
+cfg.presets     = vsel.preset;           % w1 was rejected by this test; add "w1" to repeat it
+if cfg.variant == "frozen", cfg.presets = ["jL", "w1"]; end
 cfg.poreRadius  = containers.Map({'EF2', 'B1'}, {54e-9, 11.25e-9});
 cfg.sweep_C     = 10:5:80;               % model-only temperature sweep [degC]
 cfg.mldo        = true;                  % CCE at each measured temperature

@@ -15,6 +15,16 @@ classdef RockOffsetTIP
     %
     % Usage:
     %   tip = thermo.RockOffsetTIP.frozen("jL", workbookFile);
+    %
+    % Presets
+    %   jL  : joint-Linearized, LL-inv_wbar (primary; workbook BIP C1-nC5 = 0.012022,
+    %         adjusted C1-nC5 compositions)
+    %   jL2 : jL with the C1-nC5 group TIP re-optimised for the recalibrated bulk
+    %         model (nominal C1-nC5 compositions, BIP C1-nC5 = 0.0005, nC5-nC10 =
+    %         0.000746; "MixtureData - Recalibrated.xlsx"). Same objective as the
+    %         jL fit (RMSE of absolute confined Pdew, FWI-Only, k/p/lambda frozen);
+    %         re-derived in MATLAB by Recalibrate_C1nC5.m.
+    %   w1  : pareto-exact-w1, LL-Tstar (sensitivity; fails the temperature test)
     %   K   = tip.matrix(eos.Fluid, "EF2", T);           % TIP matrix (kijc)
     %   tip.applyTo(eos)                                  % set k, p, lambda on an EOS
 
@@ -45,7 +55,7 @@ classdef RockOffsetTIP
             % preset "jL" (joint-Linearized, LL-inv_wbar; primary) or
             % "w1" (pareto-exact-w1, LL-Tstar; sensitivity).
             arguments
-                preset       (1,1) string {mustBeMember(preset, ["jL", "w1"])}
+                preset       (1,1) string {mustBeMember(preset, ["jL", "jL2", "w1"])}
                 workbookFile (1,1) string
             end
             obj = thermo.RockOffsetTIP();
@@ -56,6 +66,11 @@ classdef RockOffsetTIP
                     obj.k = 112.42634826677;  obj.p = 1.3558179290678;  obj.lambda = 2.0916235090532;
                     obj.Descriptor = "inv_wbar";  obj.Form = "LL-inv_wbar";
                     obj.GroupTIPs = [-4.9229696302796, -1.96920366521686, -1.44628069292089, -0.754862049795788];
+                case "jL2"
+                    obj.Combination = "joint-linearized (C1-nC5 recalibrated)";
+                    obj.k = 112.42634826677;  obj.p = 1.3558179290678;  obj.lambda = 2.0916235090532;
+                    obj.Descriptor = "inv_wbar";  obj.Form = "LL-inv_wbar";
+                    obj.GroupTIPs = [-4.891452765367, -1.96920366521686, -1.44628069292089, -0.754862049795788];
                 case "w1"
                     obj.Combination = "pareto-exact-w1";
                     obj.k = 166.410385934507;  obj.p = 1.5488421885245;  obj.lambda = 4.47908205631447;

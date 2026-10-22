@@ -29,8 +29,16 @@ if isempty(scriptDir), scriptDir = pwd; end
 addpath(fullfile(scriptDir, "src"));
 
 %% 0. Configuration -------------------------------------------------------------
-cfg.mixtureFile = fullfile(scriptDir, "config", "MixtureData - Complete Mixtures.xlsx");
-cfg.outDir      = fullfile(scriptDir, "results", "mldo_check");
+% --- Model variant -----------------------------------------------------------------
+%   "frozen" : current calibration (workbook "MixtureData - Complete Mixtures.xlsx", preset jL)
+%   "recal"  : C1-nC5 recalibration (workbook "MixtureData - Recalibrated.xlsx", preset jL2)
+cfg.variant = "frozen";
+variants = struct( ...
+    'frozen', struct('file', "MixtureData - Complete Mixtures.xlsx", 'preset', "jL"), ...
+    'recal',  struct('file', "MixtureData - Recalibrated.xlsx",     'preset', "jL2"));
+vsel = variants.(char(cfg.variant));
+cfg.mixtureFile = fullfile(scriptDir, "config", vsel.file);
+cfg.outDir      = fullfile(scriptDir, "results", "mldo_check_" + cfg.variant);
 cfg.compositions = ["nominal", "adjusted"];
 cfg.bipSets      = ["workbook", "literature"];
 cfg.bipSheets    = struct('workbook', "BIP", 'literature', "BIP_Literature");
