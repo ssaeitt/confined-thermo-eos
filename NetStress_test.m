@@ -163,24 +163,32 @@ end
 %% 5. Figure: shift vs pore radius, one tile per fluid ----------------------------------------
 figure('Name', 'Net-stress test', 'Position', [60 60 1150 780]);
 tiledlayout(2, 2, 'TileSpacing', 'compact');
+% Plotted over the measured radius window only (the sweep CSV keeps the full range); the
+% sqrt(k) radius set is reported in the CSVs but not plotted (rejected by the test).
+cfg.plotR_nm = [30, 80];
 for i = first.'
-    nexttile; hold on; box on;
-    s = S(S.Fluid_ID == fid(i), :);
-    plot(s.r_nm, s.Shift_model_psi, '-', 'Color', [0.05 0.49 0.48], 'LineWidth', 1.6, 'DisplayName', "model " + cfg.preset);
+    nexttile; hold on; box on; grid on;
+    s = S(S.Fluid_ID == fid(i) & S.r_nm >= cfg.plotR_nm(1) & S.r_nm <= cfg.plotR_nm(2), :);
+    s = sortrows(s, 'r_nm');
     sel = find(fid == fid(i));
     lo = dp.ConfLower_psi(sel) - dp.BulkPdew_psi(sel);  up = dp.ConfUpper_psi(sel) - dp.BulkPdew_psi(sel);
+    th = R(R.Fluid_ID == fid(i) & R.RadiusSet == "thesis", :);
+    plot(s.r_nm, s.Shift_model_psi, '-', 'Color', [0.05 0.49 0.48], 'LineWidth', 1.6, ...
+         'DisplayName', "model " + cfg.preset);
+    plot(th.r_nm, th.Shift_model_psi, 'o', 'Color', [0.05 0.49 0.48], 'MarkerFaceColor', 'w', ...
+         'MarkerSize', 6, 'LineWidth', 1.2, 'HandleVisibility', 'off');
     errorbar(dp.PoreRadius_nm(sel), 0.5 * (lo + up), 0.5 * (up - lo), 'ks', 'MarkerFaceColor', 'k', ...
-             'LineWidth', 1.2, 'DisplayName', 'measured, thesis r (54/45/38 nm)');
-    errorbar(rSet.sqrtk(sel), 0.5 * (lo + up), 0.5 * (up - lo), 'o', 'Color', [0.88 0.56 0.17], ...
-             'LineWidth', 1.0, 'DisplayName', 'measured, r \propto \surd{k}');
+             'LineWidth', 1.2, 'DisplayName', 'measured (r = 54 / 45 / 38 nm)');
     for n = 1:numel(sel)
-        text(dp.PoreRadius_nm(sel(n)), up(n), sprintf('  %d psi', ns(sel(n))), 'FontSize', 8, ...
-             'VerticalAlignment', 'bottom');
+        text(dp.PoreRadius_nm(sel(n)), lo(n), sprintf('%d psi', ns(sel(n))), 'FontSize', 8, ...
+             'HorizontalAlignment', 'center', 'VerticalAlignment', 'top', 'Color', [0.3 0.3 0.3]);
     end
-    set(gca, 'XScale', 'log');  xlim([min(cfg.rSweep_nm), max(cfg.rSweep_nm)]);
+    xlim(cfg.plotR_nm);
+    yl = [min([lo; s.Shift_model_psi]), max([up; s.Shift_model_psi])];
+    ylim([max(0, yl(1) - 0.15 * diff(yl)), yl(2) + 0.05 * diff(yl)]);
     xlabel('Mean pore radius [nm]');  ylabel('P_{dew,conf} - P_{dew,bulk} [psi]');
     title(label(i) + " (" + fid(i) + "), EF2");
-    legend('Location', 'northeast', 'FontSize', 8);
+    legend('Location', 'northeast', 'FontSize', 8, 'Box', 'off');
 end
 exportgraphics(gcf, fullfile(cfg.outDir, "netstress_test.png"), 'Resolution', 200);
 fprintf('Written: %s\n', cfg.outDir);
