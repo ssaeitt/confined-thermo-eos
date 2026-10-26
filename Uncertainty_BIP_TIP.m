@@ -123,14 +123,14 @@ for n = 1:nR
     fprintf('  %-42s UT %5.1f | UX %s | lag %5.1f psi %s\n', rows(n).Label, u.UT / psi, ...
             strjoin(compose("%6.1f", u.UX / psi), " / "), u.lag / psi, u.note);
 end
-vn = {'Row', 'Pmeas_psi', 'Pmodel_psi', 'Bulk_err_pct', 'dP_Tm1_psi', 'dP_Tp1_psi', 'UT_psi'};
+vn = {'Case', 'Pmeas_psi', 'Pmodel_psi', 'Bulk_err_pct', 'dP_Tm1_psi', 'dP_Tp1_psi', 'UT_psi'};
 for q = 1:nS
     tag = sprintf('%g', 100 * cfg.lab.CompRel(q));
     vn = [vn, {['UX' tag '_psi'], ['U' tag '_psi'], ['U' tag '_pct'], ['UX' tag '_oneSided']}]; %#ok<AGROW>
 end
 vn = [vn, {'lag_psi', 'lag_pct', 'Note'}];
 Budget = cell2table(budRows, 'VariableNames', vn);
-Budget = convertvars(Budget, {'Row', 'Note'}, 'string');
+Budget = convertvars(Budget, {'Case', 'Note'}, 'string');
 writetable(Budget, xls, 'Sheet', 'Budget');
 disp(Budget);
 
@@ -224,9 +224,9 @@ for ip = 1:numel(cfg.pairs)
             strjoin(pr, "-"), 100 * cfg.lab.CompRel(q), wlo, whi, kW, chi2, kWB, max(k1lo), min(k1hi), status);
     end
 end
-Edges = cell2table(edgeRows, 'VariableNames', {'Pair', 'CompRel_pct', 'Row', 'BandLo_minus_Pm_psi', ...
+Edges = cell2table(edgeRows, 'VariableNames', {'Pair', 'CompRel_pct', 'Case', 'BandLo_minus_Pm_psi', ...
     'BandHi_minus_Pm_psi', 'BIP_at_BandLo', 'BIP_at_BandHi', 'BIP_at_minus1pct', 'BIP_at_plus1pct'});
-Edges = convertvars(Edges, {'Pair', 'Row'}, 'string');
+Edges = convertvars(Edges, {'Pair', 'Case'}, 'string');
 Windows = cell2table(winRows, 'VariableNames', {'Pair', 'CompRel_pct', 'nRows', 'Window_lo', 'Window_hi', ...
     'WLS_BIP', 'WLS_chi2', 'Workbook_BIP', 'Workbook_inside', 'OnePct_lo', 'OnePct_hi', 'Status'});
 Windows = convertvars(Windows, {'Pair', 'Status'}, 'string');
@@ -370,15 +370,15 @@ for ip = 1:numel(cfg.pairs)
     pr = strjoin(cfg.pairs{ip}, "-");  nexttile; hold on; box on;
     rng = cfg.bipRange.(char(strjoin(cfg.pairs{ip}, "_")));
     clip = @(v) min(max(v, rng(1)), rng(2));          % +-Inf edges (no constraint / none) to the range
-    E = Edges(Edges.Pair == pr, :);  labs = unique(E.Row, 'stable');
+    E = Edges(Edges.Pair == pr, :);  labs = unique(E.Case, 'stable');
     for m = 1:numel(labs)
         for q = 1:nS
-            e = E(E.Row == labs(m) & E.CompRel_pct == 100 * cfg.lab.CompRel(q), :);
+            e = E(E.Case == labs(m) & E.CompRel_pct == 100 * cfg.lab.CompRel(q), :);
             plot(clip([e.BIP_at_BandLo, e.BIP_at_BandHi]), m + [0, 0] + 0.15 * (q - 1), '-', 'LineWidth', 4 - q, ...
                  'DisplayName', sprintf('band, %g %% comp.', 100 * cfg.lab.CompRel(q)), ...
                  'HandleVisibility', localOnOff(m == 1));
         end
-        e = E(E.Row == labs(m) & E.CompRel_pct == 100 * cfg.lab.CompRel(1), :);
+        e = E(E.Case == labs(m) & E.CompRel_pct == 100 * cfg.lab.CompRel(1), :);
         plot(clip([e.BIP_at_minus1pct, e.BIP_at_plus1pct]), m - 0.15 + [0, 0], 'k:', 'LineWidth', 2, ...
              'HandleVisibility', localOnOff(m == 1), 'DisplayName', '\pm1 % rule');
     end
