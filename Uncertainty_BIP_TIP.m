@@ -247,7 +247,7 @@ for q = find(ismember(cfg.lab.CompRel, cfg.cornerScenarios))
     TIPS.(sKey) = nan(numel(groups), 3);
     for g = 1:numel(groups)
         pk = char(grpPair(g));  w = WIN.(pk)(q, :);
-        centre = w(4);  if cfg.cornerCentre == "wls", centre = w(2); end
+        centre = w(4);  if cfg.cornerCentre == "wls" || w(4) < w(1) || w(4) > w(3), centre = w(2); end   % workbook outside window -> WLS
         lev = [w(1), centre, w(3)];
         if w(1) > w(3) || any(isnan(lev)), lev = [centre, centre, centre]; end   % empty window
         gp = split(groups(g), "|");  pair = split(gp(1), "-");
@@ -321,7 +321,7 @@ if cfg.predict
                 runner.clearBIP();
                 for ip = 1:3
                     pr = cfg.pairs{ip};  w = WIN.(char(strjoin(pr, "_")))(q, :);
-                    centre = w(4);  if cfg.cornerCentre == "wls", centre = w(2); end
+                    centre = w(4);  if cfg.cornerCentre == "wls" || w(4) < w(1) || w(4) > w(3), centre = w(2); end   % workbook outside window -> WLS
                     lev = [w(1), centre, w(3)];
                     if w(1) > w(3) || any(isnan(lev)), lev = [centre, centre, centre]; end
                     runner.setBIP(pr(1), pr(2), lev(CC{j}.lev(ip)));
@@ -366,6 +366,7 @@ end
 %% 7. Figure: per-row BIP intervals vs the +-1 % rule ---------------------------------------------------
 figure('Name', 'BIP windows from the measurement uncertainty', 'Position', [60 60 1400 420]);
 tiledlayout(1, numel(cfg.pairs), 'TileSpacing', 'compact');
+bandCol = [0 0.447 0.741; 0.850 0.325 0.098; 0.466 0.674 0.188];   % fixed colour per composition scenario
 for ip = 1:numel(cfg.pairs)
     pr = strjoin(cfg.pairs{ip}, "-");  nexttile; hold on; box on;
     rng = cfg.bipRange.(char(strjoin(cfg.pairs{ip}, "_")));
@@ -375,6 +376,7 @@ for ip = 1:numel(cfg.pairs)
         for q = 1:nS
             e = E(E.Case == labs(m) & E.CompRel_pct == 100 * cfg.lab.CompRel(q), :);
             plot(clip([e.BIP_at_BandLo, e.BIP_at_BandHi]), m + [0, 0] + 0.15 * (q - 1), '-', 'LineWidth', 4 - q, ...
+                 'Color', bandCol(min(q, size(bandCol, 1)), :), ...
                  'DisplayName', sprintf('band, %g %% comp.', 100 * cfg.lab.CompRel(q)), ...
                  'HandleVisibility', localOnOff(m == 1));
         end
@@ -383,7 +385,9 @@ for ip = 1:numel(cfg.pairs)
              'HandleVisibility', localOnOff(m == 1), 'DisplayName', '\pm1 % rule');
     end
     w = Windows(Windows.Pair == pr, :);
-    xline(w.Workbook_BIP(1), 'r--', 'workbook', 'HandleVisibility', 'off');
+    xline(w.Workbook_BIP(1), 'r--', 'workbook', 'HandleVisibility', 'off', 'LabelVerticalAlignment', 'bottom', ...
+          'LabelOrientation', 'horizontal', 'FontSize', 7);
+    ylim([0.5, numel(labs) + 0.6]);
     set(gca, 'YTick', 1:numel(labs), 'YTickLabel', labs, 'TickLabelInterpreter', 'none', 'FontSize', 7);
     xlabel("BIP " + pr);  title(pr);
     if ip == 1, legend('Location', 'best'); end
