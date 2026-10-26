@@ -18,6 +18,7 @@ classdef DewPointRunner < handle
         BulkP        containers.Map        % "mixture|rock|z" -> Pa
         BulkK        containers.Map
         FWI          double = []           % [k, p, lambda] from setFWI; applied to engines created later
+        BIPOverride  containers.Map        % "A|B" -> BIP; set by setBIP, applied to every engine
     end
 
     properties (Access = public)
@@ -52,12 +53,14 @@ classdef DewPointRunner < handle
             obj.Warm    = containers.Map();
             obj.BulkP   = containers.Map();
             obj.BulkK   = containers.Map();
+            obj.BIPOverride = containers.Map();
         end
 
         function eng = engine(obj, mixture, rock)
             key = char(string(mixture) + "|" + string(rock));
             if ~isKey(obj.Engines, key)
                 fl  = entities.FluidProperties.loadFromWorkbook(obj.WorkbookFile, string(mixture));
+                fl  = obj.applyBIP(fl);
                 rk  = entities.RockProperties.loadFromWorkbook(obj.WorkbookFile, string(rock));
                 eos = thermo.ConfinedEOS(fl, rk);
                 if ~isempty(obj.FWI)              % engines created after setFWI get the same values
@@ -83,6 +86,21 @@ classdef DewPointRunner < handle
 
         function clearWarm(obj)
             obj.Warm = containers.Map();
+        end
+
+        function setBIP(obj, a, b, value)
+            % Override the fluid-fluid BIP of pair (a, b) for every mixture containing
+            % both components (workbook value otherwise). Engines are rebuilt on demand
+            % and the bulk and warm caches are cleared, so no state of the previous BIP
+            % is reused. FWI values set by setFWI are kept.
+            obj.BIPOverride(char(string(a) + "|" + string(b))) = value;
+            obj.resetEngines();
+        end
+
+        function clearBIP(obj)
+            % Back to the workbook BIPs.
+            obj.BIPOverride = containers.Map();
+            obj.resetEngines();
         end
 
         function [P, K, ok] = bulk(obj, c)
@@ -141,6 +159,27 @@ classdef DewPointRunner < handle
     end
 
     methods (Access = private)
+        function resetEngines(obj)
+            obj.Engines = containers.Map();
+            obj.Warm    = containers.Map();
+            obj.BulkP   = containers.Map();
+            obj.BulkK   = containers.Map();
+        end
+
+        function fl = applyBIP(obj, fl)
+            if obj.BIPOverride.Count == 0, return; end
+            K = fl.BIPMatrix;  ks = keys(obj.BIPOverride);  changed = false;
+            for n = 1:numel(ks)
+                pr = split(string(ks{n}), "|");
+                if ~all(ismember(pr, string(fl.ComponentNames))), continue; end
+                i = fl.componentIndex(pr(1));  j = fl.componentIndex(pr(2));
+                K(i, j) = obj.BIPOverride(ks{n});  K(j, i) = K(i, j);  changed = true;
+            end
+            if ~changed, return; end
+            fl = entities.FluidProperties(fl.ComponentNames, fl.Tc, fl.Pc, fl.omega, fl.MW, fl.Vc, ...
+                fl.Parachor, fl.ZRackett, fl.VolumeShift, fl.LJ_Size, fl.LJ_Energy, K);
+        end
+
         function [P, Pcap, ok, info] = solveConfined(obj, eng, c, r, mode, key, bulk)
             ok = false;  P = NaN;  Pcap = NaN;
             info = solvers.DewPointRunner.emptyInfo("none");

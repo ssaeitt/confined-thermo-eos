@@ -78,25 +78,25 @@ classdef RockOffsetTIP
                     obj.GroupTIPs = [-7.012375, -2.883946, -2.124570, -1.168401];
             end
 
-            G = numel(obj.Groups);
-            x = zeros(G, 1);  isB1 = false(G, 1);
-            for g = 1:G
-                pr = split(obj.Groups(g), "|");
-                fl = entities.FluidProperties.loadFromWorkbook(workbookFile, pr(1));
-                X  = thermo.RockOffsetTIP.descriptor(fl, obj.Descriptor, obj.Tcal);
-                x(g) = X(1, 2);
-                isB1(g) = pr(2) == "B1";
+            obj = thermo.RockOffsetTIP.fitCorrelation(obj, workbookFile);
+        end
+
+        function obj = custom(name, groupTIPs, descriptor, workbookFile, kpl)
+            % Rock-offset correlation fitted to user-supplied per-group TIPs (order of
+            % Groups), e.g. TIPs refitted at the edges of a BIP window. kpl = [k, p, lambda].
+            arguments
+                name         (1,1) string
+                groupTIPs    (1,4) double {mustBeNegative}
+                descriptor   (1,1) string
+                workbookFile (1,1) string
+                kpl          (1,3) double
             end
-            y = log(-obj.GroupTIPs(:));
-            A = [double(~isB1), double(isB1), x];
-            if rank(A) < 3
-                error('RockOffsetTIP:Rank', 'TIP design matrix is rank-deficient.');
-            end
-            par = A \ y;
-            res = A * par - y;
-            obj.alphaEF2 = par(1);  obj.alphaB1 = par(2);  obj.B = par(3);
-            obj.rmseLnEF2 = sqrt(mean(res(~isB1).^2));
-            obj.xCal = x;
+            obj = thermo.RockOffsetTIP();
+            obj.Preset = "custom";  obj.Combination = name;
+            obj.k = kpl(1);  obj.p = kpl(2);  obj.lambda = kpl(3);
+            obj.Descriptor = descriptor;  obj.Form = "LL-" + descriptor;
+            obj.GroupTIPs = groupTIPs;
+            obj = thermo.RockOffsetTIP.fitCorrelation(obj, workbookFile);
         end
 
         function X = descriptor(fl, name, T)
@@ -141,6 +141,41 @@ classdef RockOffsetTIP
             s = sprintf(['%s (%s): k = %.6f, p = %.6f, lambda = %.6f | TIP %s: alpha_EF2 = %+.6f, ' ...
                          'alpha_B1 = %+.6f, B = %+.6f (RMSE ln, EF2 = %.4f)'], obj.Preset, obj.Combination, ...
                          obj.k, obj.p, obj.lambda, obj.Form, obj.alphaEF2, obj.alphaB1, obj.B, obj.rmseLnEF2);
+        end
+    end
+
+    methods (Static, Access = private)
+        function obj = fitCorrelation(obj, workbookFile)
+            % Least squares ln(-TIP_g) = alpha_rock(g) + B x_g over the four groups,
+            % descriptors at Tcal (as TIP_correlation.m fitForm). Group descriptors
+            % are cached per workbook and descriptor.
+            persistent XC
+            if isempty(XC), XC = containers.Map(); end
+            G = numel(obj.Groups);
+            ck = char(workbookFile + "|" + obj.Descriptor);
+            if isKey(XC, ck)
+                x = XC(ck);
+            else
+                x = zeros(G, 1);
+                for g = 1:G
+                    pr = split(obj.Groups(g), "|");
+                    fl = entities.FluidProperties.loadFromWorkbook(workbookFile, pr(1));
+                    X  = thermo.RockOffsetTIP.descriptor(fl, obj.Descriptor, obj.Tcal);
+                    x(g) = X(1, 2);
+                end
+                XC(ck) = x;
+            end
+            isB1 = endsWith(obj.Groups(:), "|B1");
+            y = log(-obj.GroupTIPs(:));
+            A = [double(~isB1), double(isB1), x];
+            if rank(A) < 3
+                error('RockOffsetTIP:Rank', 'TIP design matrix is rank-deficient.');
+            end
+            par = A \ y;
+            res = A * par - y;
+            obj.alphaEF2 = par(1);  obj.alphaB1 = par(2);  obj.B = par(3);
+            obj.rmseLnEF2 = sqrt(mean(res(~isB1).^2));
+            obj.xCal = x;
         end
     end
 end
