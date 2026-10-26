@@ -33,6 +33,22 @@ classdef UncertaintyBudget < handle
     %   sigma : rectangular bounds -> standard uncertainties
     %           sigma^2 = (UX^2 + UT^2 + Urep^2) / 3 + lag^2 / 12, target Pm + lag / 2
     %
+    % GUM / NIST TN 1297 combination (gum, gumMLDO):
+    %   Each excursion above is a Type B input. With the distribution assigned to
+    %   it (CompDist, TempDist, GaugeDist, ReadDist) it becomes a standard
+    %   uncertainty u = bound / divisor:
+    %       "rectangular" sqrt(3) | "triangular" sqrt(6) | "normal95" 2 (bound given
+    %       at ~95 %) | "standard" 1 (the figure already is a standard uncertainty)
+    %   One-sided effects (detection lag, dew pick during the pressure ramp,
+    %   width w) are rectangular on [0, w]: the measured value is corrected by
+    %   +w/2 and u = w/sqrt(12).
+    %   Combined standard uncertainty (law of propagation, uncorrelated inputs,
+    %   sensitivities by finite difference):
+    %       u_c^2 = u_X^2 + u_T^2 + u_gauge^2 + u_lag^2 + u_pick^2 + u_rep^2
+    %   Expanded uncertainty U_c = k u_c (Coverage k, default 2: ~0.95 level of
+    %   confidence). Model check: E_n = (model - y) / U_c, |E_n| <= 1 consistent.
+    %   u_rep is a Type A (repeatability) standard uncertainty passed by the caller.
+    %
     % The sensitivities are evaluated with the BIP matrix of the fluid passed in.
 
     properties (SetAccess = private)
@@ -44,6 +60,14 @@ classdef UncertaintyBudget < handle
         LightComponent   (1,1) string = "C1"
         PminFrac         (1,1) double = 0.10       % CCE for MLDO down to PminFrac * Psat
         nCoarse          (1,1) double = 60         % CCE points below 0.95 Psat
+        % GUM settings
+        CompDist         (1,1) string = "rectangular"
+        TempDist         (1,1) string = "rectangular"
+        ReadDist         (1,1) string = "rectangular"
+        GaugeDist        (1,1) string = "rectangular"
+        Gauge_psi        (1,1) double = 0          % pressure transducer bound (or u if "standard")
+        PickWidth_psi    (1,1) double = 0          % one-sided: ramp rate x observation interval
+        Coverage         (1,1) double = 2          % k
     end
 
     properties (Dependent)
@@ -62,6 +86,13 @@ classdef UncertaintyBudget < handle
                 opts.LightComponent (1,1) string = "C1"
                 opts.PminFrac (1,1) double = 0.10
                 opts.nCoarse (1,1) double = 60
+                opts.CompDist (1,1) string {mustBeMember(opts.CompDist, ["rectangular", "triangular", "normal95", "standard"])} = "rectangular"
+                opts.TempDist (1,1) string {mustBeMember(opts.TempDist, ["rectangular", "triangular", "normal95", "standard"])} = "rectangular"
+                opts.ReadDist (1,1) string {mustBeMember(opts.ReadDist, ["rectangular", "triangular", "normal95", "standard"])} = "rectangular"
+                opts.GaugeDist (1,1) string {mustBeMember(opts.GaugeDist, ["rectangular", "triangular", "normal95", "standard"])} = "rectangular"
+                opts.Gauge_psi (1,1) double = 0
+                opts.PickWidth_psi (1,1) double = 0
+                opts.Coverage (1,1) double = 2
             end
             fn = fieldnames(opts);
             for i = 1:numel(fn), obj.(fn{i}) = opts.(fn{i}); end
@@ -165,6 +196,52 @@ classdef UncertaintyBudget < handle
         end
     end
 
+    methods
+        function g = gum(obj, P0, Pm, UX, UT, lag, uRep)
+            % GUM combination for one dew point. All pressures in the same unit
+            % (Pa as returned by evaluate). P0 model, Pm measured, UX (1 x nQ) and
+            % UT the excursions of evaluate, lag the detection lag, uRep Type A.
+            if nargin < 7 || ~isfinite(uRep), uRep = 0; end
+            psi  = 6894.757;
+            if ~isfinite(lag), lag = 0; end
+            pick = obj.PickWidth_psi * psi;
+            g.y     = Pm + (lag + pick) / 2;                 % best estimate of the measurand
+            g.uX    = UX / obj.divisor(obj.CompDist);
+            g.uT    = UT / obj.divisor(obj.TempDist);
+            g.uG    = obj.Gauge_psi * psi / obj.divisor(obj.GaugeDist);
+            g.uLag  = lag / sqrt(12);
+            g.uPick = pick / sqrt(12);
+            g.uRep  = uRep;
+            g.uTypeB = sqrt(g.uX.^2 + g.uT^2 + g.uG^2 + g.uLag^2 + g.uPick^2);
+            g.uc    = sqrt(g.uTypeB.^2 + g.uRep^2);
+            g.Uc    = obj.Coverage * g.uc;
+            g.dev   = P0 - g.y;
+            g.En    = g.dev ./ g.Uc;
+        end
+
+        function g = gumMLDO(obj, M0, Mm, UX, UT)
+            % GUM combination for the CCE maximum liquid dropout [points].
+            g.y     = Mm;
+            g.uX    = UX / obj.divisor(obj.CompDist);
+            g.uT    = UT / obj.divisor(obj.TempDist);
+            g.uRead = obj.Uread / obj.divisor(obj.ReadDist);
+            g.uc    = sqrt(g.uX.^2 + g.uT^2 + g.uRead^2);
+            g.Uc    = obj.Coverage * g.uc;
+            g.dev   = M0 - g.y;
+            g.En    = g.dev ./ g.Uc;
+        end
+
+        function u = uTemp(obj, T)
+            % Standard uncertainty of the temperature [K] at T [K].
+            u = obj.tempUncertainty(T) / obj.divisor(obj.TempDist);
+        end
+
+        function u = uCompRel(obj)
+            % Relative standard uncertainty of the heavy fraction(s), one per CompRel.
+            u = obj.CompRel / obj.divisor(obj.CompDist);
+        end
+    end
+
     methods (Access = private)
         function [M, P, note] = mldoAt(obj, sat, pt, pvt, T, Pguess, z)
             [M, P, note] = deal(NaN, NaN, "");
@@ -201,6 +278,29 @@ classdef UncertaintyBudget < handle
     end
 
     methods (Static)
+        function d = divisor(dist)
+            % Bound -> standard uncertainty (GUM 4.3.7, 4.3.9; NIST TN 1297 4.6).
+            switch string(dist)
+                case "rectangular", d = sqrt(3);
+                case "triangular",  d = sqrt(6);
+                case "normal95",    d = 2;
+                case "standard",    d = 1;
+                otherwise, error('UncertaintyBudget:Distribution', 'Unknown distribution "%s".', dist);
+            end
+        end
+
+        function s = report(y, U)
+            % "y +- U" with U to two significant digits and y to the same decimal
+            % place (no more than one digit beyond the uncertainty; JCED rule).
+            if ~isfinite(U) || U <= 0 || ~isfinite(y), s = string(sprintf('%g', y)); return; end
+            d  = 1 - floor(log10(U));
+            Ur = round(U, d);
+            if Ur >= 10^(2 - d), d = d - 1; Ur = round(U, d); end     % 9.96 -> 10
+            yr = round(y, d);
+            fmt = sprintf('%%.%df', max(d, 0));
+            s = string(sprintf([fmt ' ' char(177) ' ' fmt], yr, Ur));
+        end
+
         function zz = perturb(z, iL, ih, rel)
             % Heavy component ih scaled by (1 + rel); the light component takes up
             % the balance. Empty when the light fraction would become non-positive.

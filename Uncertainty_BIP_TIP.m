@@ -27,6 +27,15 @@
 % 2. BIP window per pair: BIPs for which EVERY 20 degC hydrocarbon row containing
 %    the pair (binaries, ternary, late-core bulk) lies inside its band; other BIPs
 %    at the workbook values. Also reported: weighted-LSQ BIP and the old +-1 % window.
+% 1b. GUM / NIST TN 1297 form (cfg.gum): every bound becomes a standard
+%    uncertainty (rectangular: bound/sqrt(3); one-sided lag and dew pick:
+%    correction +w/2, u = w/sqrt(12)), combined in quadrature, expanded with
+%    k = 2 (~0.95 level of confidence). Reported as y +- U_c with JCED digits,
+%    with E_n = (model - y)/U_c (|E_n| <= 1: model consistent with the datum).
+%    Sheets GUM_Pdew, GUM_MLDO, GUM_MLDO_dT, GUM_Confined, GUM_Duplicates, GUM_Footnote.
+%    Duplicates (same mixture and z, separate batches) give a Type A check:
+%    |dP| / (k sqrt(2) u_c) <= 1 if the Type B budget covers the repeatability.
+%    cfg.gum.windows = true builds the BIP windows and WLS weights from y +- U_c.
 % 3. TIP corner sets: each group TIP refitted (FWI-Only, k, p, lambda frozen at jL)
 %    at the low / centre / high BIP of its own pair (early-campaign rows, as the presets); the 27 corners combine them and
 %    are each fitted by the rock-offset correlation (thermo.RockOffsetTIP.custom).
@@ -54,8 +63,19 @@ cfg.outDir = fullfile(scriptDir, "results", "uncertainty_bip_tip_" + cfg.variant
 cfg.T      = 293.15;
 
 % Laboratory figures
-cfg.lab = struct('CompRel', [0.05, 0.10], 'TempRel', 0.05, 'CellVolume_cc', 20, 'DetectVolume_cc', 0.1, ...
-                 'Repeat_psi', 0);
+cfg.lab = struct('CompRel', [0.05, 0.10], 'TempRel', 0.05, 'dT_C', NaN, 'CellVolume_cc', 20, ...
+                 'DetectVolume_cc', 0.1, 'Repeat_psi', 0, 'Gauge_psi', 0, 'PickWidth_psi', 0);
+% dT_C          : temperature figure in K; overrides TempRel when finite (e.g. 0.1 from
+%                 the thermostat/RTD calibration, with cfg.gum.TempDist = "standard")
+% Gauge_psi     : pressure transducer accuracy (bound unless GaugeDist = "standard")
+% PickWidth_psi : one-sided dew-pick width = depletion rate x observation interval
+%                 (e.g. 1 psi/min read every 5 min -> 5 psi); 0 = not quantified
+% GUM settings (sheets GUM_*). Distributions: "rectangular" | "triangular" | "normal95" | "standard"
+cfg.gum = struct('enable', true, 'Coverage', 2, 'CompDist', "rectangular", 'TempDist', "rectangular", ...
+                 'ReadDist', "rectangular", 'GaugeDist', "rectangular", ...
+                 'repeat_psi', 0, ...                % Type A standard uncertainty added to every row
+                 'repeatFromDuplicates', false, ...  % true: use the pooled s of the duplicates instead
+                 'windows', true);                   % BIP windows / WLS from y +- U_c (false: bound bands)
 cfg.mldo = true;                                  % MLDO budget + composition-adjustment check
 % Repeat_psi: optional repeatability bound added in quadrature to U (0 = the
 % laboratory figures only). The two C1-nC8 [0.9, 0.1] bulk values (4110 and 4126 psi,
@@ -86,8 +106,13 @@ xls = fullfile(cfg.outDir, "uncertainty_bip_tip.xlsx");
 if isfile(xls), delete(xls); end
 rock = entities.RockProperties.loadFromWorkbook(cfg.file, "EF2");
 fwiRef = thermo.RockOffsetTIP.frozen(cfg.preset, cfg.file);
-ub = solvers.UncertaintyBudget('CompRel', cfg.lab.CompRel, 'TempRel', cfg.lab.TempRel, ...
-        'CellVolume_cc', cfg.lab.CellVolume_cc, 'DetectVolume_cc', cfg.lab.DetectVolume_cc);
+ub = solvers.UncertaintyBudget('CompRel', cfg.lab.CompRel, 'TempRel', cfg.lab.TempRel, 'dT_C', cfg.lab.dT_C, ...
+        'CellVolume_cc', cfg.lab.CellVolume_cc, 'DetectVolume_cc', cfg.lab.DetectVolume_cc, ...
+        'CompDist', cfg.gum.CompDist, 'TempDist', cfg.gum.TempDist, 'ReadDist', cfg.gum.ReadDist, ...
+        'GaugeDist', cfg.gum.GaugeDist, 'Gauge_psi', cfg.lab.Gauge_psi, ...
+        'PickWidth_psi', cfg.lab.PickWidth_psi, 'Coverage', cfg.gum.Coverage);
+gumOn = cfg.gum.enable;
+if ~gumOn, cfg.gum.windows = false; end
 nS = numel(cfg.lab.CompRel);
 
 %% 1. Bulk rows (20 degC, hydrocarbons, unique mixture + z + bulk Pdew) ---------------
@@ -134,10 +159,92 @@ Budget = convertvars(Budget, {'Case', 'Note'}, 'string');
 writetable(Budget, xls, 'Sheet', 'Budget');
 disp(Budget);
 
+%% 2a. GUM form: duplicates (Type A check), y +- U_c, E_n -----------------------------------------
+G = [];
+if gumOn
+    % Duplicates: same mixture and z, separate fillings (rows differ in measured Pdew)
+    keyR = strings(nR, 1);
+    for n = 1:nR, keyR(n) = rows(n).Mixture + "|" + strjoin(compose("%.6g", rows(n).z.'), ","); end
+    [uKey, ~, gi] = unique(keyR, 'stable');
+    dupRows = {};  ssq = 0;  dof = 0;
+    for gk = 1:numel(uKey)
+        mem = find(gi == gk);
+        if numel(mem) < 2, continue; end
+        Pv = [rows(mem).Pm].';  sg = std(Pv);              % Type A, n - 1
+        ssq = ssq + (numel(mem) - 1) * sg^2;  dof = dof + numel(mem) - 1;
+        g1 = ub.gum(U(mem(1)).P0, rows(mem(1)).Pm, U(mem(1)).UX, U(mem(1)).UT, U(mem(1)).lag, 0);
+        dPd = max(Pv) - min(Pv);
+        rec = {uKey(gk), numel(mem), strjoin(compose("%.0f", Pv.' / psi), " / "), dPd / psi, sg / psi, numel(mem) - 1};
+        for q = 1:nS
+            rec = [rec, {g1.uTypeB(q) / psi, dPd / (ub.Coverage * sqrt(2) * g1.uTypeB(q))}]; %#ok<AGROW>
+        end
+        dupRows(end+1, :) = rec; %#ok<SAGROW>
+        fprintf('  duplicate %-30s dP %.0f psi, s %.1f psi (nu %d) | u_c(Type B) %s psi | dP/(k sqrt2 u_c) %s\n', ...
+            uKey(gk), dPd / psi, sg / psi, numel(mem) - 1, strjoin(compose("%.1f", g1.uTypeB / psi), " / "), ...
+            strjoin(compose("%.2f", dPd ./ (ub.Coverage * sqrt(2) * g1.uTypeB)), " / "));
+    end
+    sPool = NaN;  if dof > 0, sPool = sqrt(ssq / dof); end
+    uRep = cfg.gum.repeat_psi * psi;
+    if cfg.gum.repeatFromDuplicates && isfinite(sPool), uRep = sPool; end
+    if ~isempty(dupRows)
+        vnD = {'Group', 'n', 'Pmeas_psi', 'Range_psi', 'sTypeA_psi', 'nu'};
+        for q = 1:nS
+            tag = sprintf('%g', 100 * cfg.lab.CompRel(q));
+            vnD = [vnD, {['ucTypeB' tag '_psi'], ['Ratio' tag]}]; %#ok<AGROW>
+        end
+        Dups = cell2table(dupRows, 'VariableNames', vnD);
+        Dups = convertvars(Dups, {'Group', 'Pmeas_psi'}, 'string');
+        writetable(Dups, xls, 'Sheet', 'GUM_Duplicates');
+        fprintf('  pooled Type A s = %.1f psi (nu = %d); u_rep used = %.1f psi\n', sPool / psi, dof, uRep / psi);
+    end
+
+    G = repmat(struct('y', NaN, 'uc', nan(1, nS), 'Uc', nan(1, nS), 'En', nan(1, nS)), nR, 1);
+    gRows = {};  ucr = ub.uCompRel();
+    for n = 1:nR
+        g = ub.gum(U(n).P0, rows(n).Pm, U(n).UX, U(n).UT, U(n).lag, uRep);
+        G(n) = struct('y', g.y, 'uc', g.uc, 'Uc', g.Uc, 'En', g.En);
+        hv = split(rows(n).Mixture, "-") ~= "C1";
+        rec = {rows(n).Label, rows(n).Mixture, "[" + strjoin(compose("%.4g", rows(n).z.'), ",") + "]", ...
+               rows(n).T, ub.uTemp(rows(n).T), rows(n).Pm / psi, g.y / psi, U(n).P0 / psi, g.dev / psi, ...
+               g.uT / psi, g.uG / psi, g.uLag / psi, g.uPick / psi, g.uRep / psi};
+        for q = 1:nS
+            rec = [rec, {ucr(q) * max(rows(n).z(hv)), g.uX(q) / psi, g.uc(q) / psi, g.Uc(q) / psi, ...
+                         100 * g.Uc(q) / g.y, g.En(q), ...
+                         solvers.UncertaintyBudget.report(g.y / psi, g.Uc(q) / psi), ...
+                         solvers.UncertaintyBudget.report(g.y / psi * 1e-3 * 6.894757, g.Uc(q) / psi * 1e-3 * 6.894757)}]; %#ok<AGROW>
+        end
+        gRows(end+1, :) = rec; %#ok<SAGROW>
+    end
+    vnG = {'Case', 'Mixture', 'z', 'T_K', 'uT_K', 'Pmeas_psi', 'y_psi', 'Pmodel_psi', 'Dev_psi', ...
+           'uT_psi', 'uGauge_psi', 'uLag_psi', 'uPick_psi', 'uRep_psi'};
+    for q = 1:nS
+        tag = sprintf('%g', 100 * cfg.lab.CompRel(q));
+        vnG = [vnG, {['ux_heavy' tag], ['uX' tag '_psi'], ['uc' tag '_psi'], ['Uc' tag '_psi'], ['Uc' tag '_pct'], ...
+                     ['En' tag], ['Report' tag '_psi'], ['Report' tag '_MPa']}]; %#ok<AGROW>
+    end
+    GumP = cell2table(gRows, 'VariableNames', vnG);
+    GumP = convertvars(GumP, {'Case', 'Mixture', 'z'}, 'string');
+    writetable(GumP, xls, 'Sheet', 'GUM_Pdew');
+    disp(GumP(:, [{'Case', 'y_psi', 'Pmodel_psi'}, vnG(contains(vnG, ["Uc", "En"]) & ~contains(vnG, "pct"))]));
+
+    % Footnote in the JCED/TRC style (values at the first row's temperature)
+    Tf = rows(1).T;
+    ft = sprintf(['Standard uncertainties: u(T) = %.2g K (%s, from %s); u_r(x_heavy) = %s (%s, from %s %% ' ...
+        'relative on the heavy component as charged); u(p_gauge) = %.2g psi; detection lag (%.2g cm3 in %.3g cm3) and ' ...
+        'dew pick (%.3g psi) one-sided: value corrected by +w/2, u = w/sqrt(12); u_rep = %.2g psi. ' ...
+        'Expanded uncertainty U_c(p_dew) = k u_c with k = %g (%s level of confidence).'], ...
+        ub.uTemp(Tf), cfg.gum.TempDist, localTempText(cfg, Tf), strjoin(compose("%.3g", ub.uCompRel), " / "), ...
+        cfg.gum.CompDist, strjoin(compose("%g", 100 * cfg.lab.CompRel), " / "), ...
+        cfg.lab.Gauge_psi / solvers.UncertaintyBudget.divisor(cfg.gum.GaugeDist), cfg.lab.DetectVolume_cc, ...
+        cfg.lab.CellVolume_cc, cfg.lab.PickWidth_psi, uRep / psi, ub.Coverage, localConf(ub.Coverage));
+    writetable(table(string(ft), 'VariableNames', {'Footnote'}), xls, 'Sheet', 'GUM_Footnote');
+    fprintf('\n%s\n\n', ft);
+end
+
 %% 2b. MLDO budget (Bulk_PVT: all fluids and temperatures) ----------------------------------
 if cfg.mldo
     bp = readtable(cfg.file, 'Sheet', 'Bulk_PVT', 'VariableNamingRule', 'preserve');
-    mRows = {};
+    mRows = {};  gmRows = {};
     for i = 1:height(bp)
         mix = string(bp.Mixture(i));
         if any(ismember(split(mix, "-"), cfg.excludeComponents)) || ~isfinite(bp.MLDO_pct(i)), continue; end
@@ -151,6 +258,16 @@ if cfg.mldo
             rec = [rec, {m.UX(q), Uq, abs(d) <= Uq}]; %#ok<AGROW>
         end
         mRows(end+1, :) = [rec, {m.note}]; %#ok<SAGROW>
+        if gumOn
+            gm = ub.gumMLDO(m.M0, bp.MLDO_pct(i), m.UX, m.UT);
+            grec = {string(bp.Fluid_ID(i)), mix, bp.T(i), ub.uTemp(bp.T(i)), bp.MLDO_pct(i), m.M0, gm.dev, ...
+                    gm.uT, gm.uRead};
+            for q = 1:nS
+                grec = [grec, {gm.uX(q), gm.uc(q), gm.Uc(q), gm.En(q), ...
+                               solvers.UncertaintyBudget.report(gm.y, gm.Uc(q))}]; %#ok<AGROW>
+            end
+            gmRows(end+1, :) = grec; %#ok<SAGROW>
+        end
         fprintf('  MLDO %-4s %4.0f C: meas %4.1f | model %5.2f (%+5.2f) | UT %4.2f | UX %s | read %3.1f points %s\n', ...
                 string(bp.Fluid_ID(i)), bp.T(i) - 273.15, bp.MLDO_pct(i), m.M0, d, m.UT, ...
                 strjoin(compose("%5.2f", m.UX), " / "), m.Uread, m.note);
@@ -164,6 +281,40 @@ if cfg.mldo
     MLDOBudget = convertvars(MLDOBudget, {'Fluid_ID', 'Mixture', 'Note'}, 'string');
     writetable(MLDOBudget, xls, 'Sheet', 'MLDO_Budget');
     disp(MLDOBudget);
+    if gumOn && ~isempty(gmRows)
+        vnGM = {'Fluid_ID', 'Mixture', 'T_K', 'uT_K', 'MLDO_meas_pct', 'MLDO_model_pct', 'Dev_pts', 'uT_pts', 'uRead_pts'};
+        for q = 1:nS
+            tag = sprintf('%g', 100 * cfg.lab.CompRel(q));
+            vnGM = [vnGM, {['uX' tag '_pts'], ['uc' tag '_pts'], ['Uc' tag '_pts'], ['En' tag], ['Report' tag]}]; %#ok<AGROW>
+        end
+        GumM = cell2table(gmRows, 'VariableNames', vnGM);
+        GumM = convertvars(GumM, {'Fluid_ID', 'Mixture'}, 'string');
+        writetable(GumM, xls, 'Sheet', 'GUM_MLDO');
+        disp(GumM(:, [{'Fluid_ID', 'T_K', 'MLDO_meas_pct', 'MLDO_model_pct'}, vnGM(startsWith(vnGM, ["Uc", "En"]))]));
+
+        % Temperature differences of one fluid (same batch): the composition term
+        % cancels to first order; u^2 = uT(T)^2 + uT(Tref)^2 + 2 uRead^2.
+        dRows = {};
+        for fid = unique(GumM.Fluid_ID, 'stable').'
+            sF = find(GumM.Fluid_ID == fid);
+            if numel(sF) < 2, continue; end
+            [~, o] = min(GumM.T_K(sF));  r0 = sF(o);
+            for r1 = setdiff(sF, r0).'
+                dMe = GumM.MLDO_meas_pct(r1) - GumM.MLDO_meas_pct(r0);
+                dMo = GumM.MLDO_model_pct(r1) - GumM.MLDO_model_pct(r0);
+                uD  = sqrt(GumM.uT_pts(r1)^2 + GumM.uT_pts(r0)^2 + GumM.uRead_pts(r1)^2 + GumM.uRead_pts(r0)^2);
+                dRows(end+1, :) = {fid, GumM.T_K(r0), GumM.T_K(r1), dMe, dMo, dMo - dMe, ub.Coverage * uD, ...
+                                   (dMo - dMe) / (ub.Coverage * uD), ...
+                                   solvers.UncertaintyBudget.report(dMe, ub.Coverage * uD)}; %#ok<SAGROW>
+            end
+        end
+        if ~isempty(dRows)
+            GumMdT = cell2table(dRows, 'VariableNames', {'Fluid_ID', 'Tref_K', 'T_K', 'dMLDO_meas_pts', ...
+                'dMLDO_model_pts', 'Dev_pts', 'Uc_pts', 'En', 'Report'});
+            writetable(GumMdT, xls, 'Sheet', 'GUM_MLDO_dT');
+            disp(GumMdT);
+        end
+    end
 
     % Composition check: adjusted Mix_Props compositions vs the nominal (as charged) ones
     mp = readtable(cfg.file, 'Sheet', 'Mix_Props', 'VariableNamingRule', 'preserve');
@@ -202,7 +353,11 @@ for ip = 1:numel(cfg.pairs)
         [klo, khi, k1lo, k1hi] = deal(nan(numel(sel), 1));
         for m = 1:numel(sel)
             n = sel(m);
-            [lo, hi] = solvers.UncertaintyBudget.band(rows(n).Pm, U(n).UX(q), U(n).UT, U(n).lag, cfg.lab.Repeat_psi * psi);
+            if cfg.gum.windows
+                lo = G(n).y - G(n).Uc(q);  hi = G(n).y + G(n).Uc(q);
+            else
+                [lo, hi] = solvers.UncertaintyBudget.band(rows(n).Pm, U(n).UX(q), U(n).UT, U(n).lag, cfg.lab.Repeat_psi * psi);
+            end
             klo(m)  = localEdge(@(k) Pfun(n, k) - lo, rng, "lower");
             khi(m)  = localEdge(@(k) Pfun(n, k) - hi, rng, "upper");
             k1lo(m) = localEdge(@(k) Pfun(n, k) - 0.99 * rows(n).Pm, rng, "lower");
@@ -210,7 +365,8 @@ for ip = 1:numel(cfg.pairs)
             edgeRows(end+1, :) = {strjoin(pr, "-"), 100 * cfg.lab.CompRel(q), rows(n).Label, ...
                 (lo - rows(n).Pm) / psi, (hi - rows(n).Pm) / psi, klo(m), khi(m), k1lo(m), k1hi(m)}; %#ok<SAGROW>
         end
-        obj = @(k) localWLS(k, sel, rows, U, q, Pfun, cfg.lab.Repeat_psi * psi);
+        Gw = [];  if cfg.gum.windows, Gw = G; end
+        obj = @(k) localWLS(k, sel, rows, U, q, Pfun, cfg.lab.Repeat_psi * psi, Gw);
         [kW, chi2] = fminbnd(obj, rng(1), rng(2), optimset('TolX', 1e-6));
         wlo = max(klo);  whi = min(khi);
         WIN.(key)(q, :) = [wlo, kW, whi, kWB];
@@ -272,6 +428,55 @@ runner.clearBIP();
 GroupTIPs = cell2table(tipRows, 'VariableNames', {'CompRel_pct', 'Group', 'Level', 'BIP', 'TIP', ...
     'RMS_resid_psi', 'Residuals_psi'});
 writetable(GroupTIPs, xls, 'Sheet', 'GroupTIPs');
+
+%% 4b. GUM form of the confined data (preset model, workbook BIPs) -------------------------------
+% Measured range [lower, upper] read as rectangular: mid, u_range = half-width / sqrt(3).
+% Absolute confined Pdew: u^2 = u_range^2 + u_X^2 + u_T^2 + u_gauge^2 + u_rep^2, with the
+%   composition and temperature sensitivities of the bulk row (shift << Pdew).
+% Shift (confined - bulk): same batch in the cell and the core, so the composition
+%   term cancels to first order; temperature, gauge and repeatability enter twice
+%   (two apparatus), the cell detection lag and dew pick once (bulk side only).
+if gumOn
+    confIdx = find(dp.HasConfined & abs(dp.T - cfg.T) < 1e-6 & ...
+        ~arrayfun(@(i) any(ismember(split(dp.Mixture(i), "-"), cfg.excludeComponents)), (1:dp.NumCases).'));
+    cRows = {};
+    for i = confIdx.'
+        c = dp.getCase(i);
+        n = find(arrayfun(@(r) r.Mixture == c.Mixture && numel(r.z) == numel(c.z) && ...
+                 max(abs(r.z - c.z)) < 1e-9 && abs(r.Pm - c.PdewBulk) < 1e-6, rows), 1);
+        if isempty(n), continue; end
+        g = ub.gum(U(n).P0, rows(n).Pm, U(n).UX, U(n).UT, U(n).lag, uRep);
+        uR = c.PdewConfHalfWidth / sqrt(3);
+        fl = entities.FluidProperties.loadFromWorkbook(cfg.file, c.Mixture);
+        res = runner.solve(c, "FWIOnly", fwiRef.matrix(fl, c.Rock, c.T), 'r', localRadius(c, cfg));
+        Pc = NaN;  Sc = NaN;  if res.ok, Pc = res.P;  Sc = res.shift_psi * psi; end
+        Smeas = c.PdewConfMid - g.y;
+        uS = sqrt(uR^2 + 2 * g.uT^2 + 2 * g.uG^2 + 2 * g.uRep^2 + g.uLag^2 + g.uPick^2);
+        rec = {c.Mixture, "[" + strjoin(compose("%.4g", c.z.'), ",") + "]", c.Rock, c.Campaign, ...
+               localRadius(c, cfg) * 1e9, c.PdewConfMid / psi, uR / psi, Pc / psi, Smeas / psi, Sc / psi, ...
+               ub.Coverage * uS / psi, (Sc - Smeas) / (ub.Coverage * uS), ...
+               solvers.UncertaintyBudget.report(Smeas / psi, ub.Coverage * uS / psi)};
+        for q = 1:nS
+            uA = sqrt(uR^2 + g.uX(q)^2 + g.uT^2 + g.uG^2 + g.uRep^2);
+            rec = [rec, {ub.Coverage * uA / psi, (Pc - c.PdewConfMid) / (ub.Coverage * uA), ...
+                         solvers.UncertaintyBudget.report(c.PdewConfMid / psi, ub.Coverage * uA / psi)}]; %#ok<AGROW>
+        end
+        cRows(end+1, :) = rec; %#ok<SAGROW>
+    end
+    vnC = {'Mixture', 'z', 'Rock', 'Campaign', 'rp_nm', 'Conf_mid_psi', 'uRange_psi', 'Conf_model_psi', ...
+           'Shift_meas_psi', 'Shift_model_psi', 'Uc_shift_psi', 'En_shift', 'Report_shift_psi'};
+    for q = 1:nS
+        tag = sprintf('%g', 100 * cfg.lab.CompRel(q));
+        vnC = [vnC, {['Uc' tag '_abs_psi'], ['En' tag '_abs'], ['Report' tag '_abs_psi']}]; %#ok<AGROW>
+    end
+    if ~isempty(cRows)
+        GumC = cell2table(cRows, 'VariableNames', vnC);
+        GumC = convertvars(GumC, {'Mixture', 'z', 'Rock', 'Campaign'}, 'string');
+        writetable(GumC, xls, 'Sheet', 'GUM_Confined');
+        disp(GumC(:, [{'Mixture', 'z', 'Rock', 'Shift_meas_psi', 'Shift_model_psi', 'Uc_shift_psi', 'En_shift'}, ...
+                      vnC(startsWith(vnC, "En") & endsWith(vnC, "_abs"))]));
+    end
+end
 
 %% 5. Corner correlations -------------------------------------------------------------------------
 cornRows = {};  rangeRows = {};  CORN = struct();
@@ -396,6 +601,17 @@ exportgraphics(gcf, fullfile(cfg.outDir, "bip_windows.png"), 'Resolution', 200);
 fprintf('\nWritten: %s\n', cfg.outDir);
 
 %% Local functions ------------------------------------------------------------------------------------
+function s = localTempText(cfg, T)
+    if isfinite(cfg.lab.dT_C), s = sprintf('%g K', cfg.lab.dT_C);
+    else, s = sprintf('%g %% of the reading in degC = %.2g K at %.2f K', 100 * cfg.lab.TempRel, ...
+                      cfg.lab.TempRel * (T - 273.15), T); end
+end
+
+function s = localConf(k)
+    % Level of confidence for a normal distribution and coverage factor k.
+    s = sprintf('%.3g', erf(k / sqrt(2)));
+end
+
 function s = localOnOff(tf)
     if tf, s = 'on'; else, s = 'off'; end
 end
@@ -439,11 +655,16 @@ function k = localEdge(f, rng, side)
     end
 end
 
-function s = localWLS(k, sel, rows, U, q, Pfun, Urep)
+function s = localWLS(k, sel, rows, U, q, Pfun, Urep, G)
+    % G non-empty: GUM target y and standard uncertainty u_c; else the bound form.
     s = 0;
     for m = 1:numel(sel)
         n = sel(m);
-        [t, sg] = solvers.UncertaintyBudget.weight(rows(n).Pm, U(n).UX(q), U(n).UT, U(n).lag, Urep);
+        if ~isempty(G)
+            t = G(n).y;  sg = G(n).uc(q);
+        else
+            [t, sg] = solvers.UncertaintyBudget.weight(rows(n).Pm, U(n).UX(q), U(n).UT, U(n).lag, Urep);
+        end
         P = Pfun(n, k);
         if ~isfinite(P), s = s + 1e6; else, s = s + ((P - t) / sg)^2; end
     end
