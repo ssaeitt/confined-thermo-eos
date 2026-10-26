@@ -144,7 +144,7 @@ classdef RockOffsetTIP
         end
     end
 
-    methods (Static, Access = private)
+    methods (Static, Hidden)
         function obj = fitCorrelation(obj, workbookFile)
             % Least squares ln(-TIP_g) = alpha_rock(g) + B x_g over the four groups,
             % descriptors at Tcal (as TIP_correlation.m fitForm). Group descriptors
