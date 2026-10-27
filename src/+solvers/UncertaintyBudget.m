@@ -65,7 +65,8 @@ classdef UncertaintyBudget < handle
         TempDist         (1,1) string = "rectangular"
         ReadDist         (1,1) string = "rectangular"
         GaugeDist        (1,1) string = "rectangular"
-        Gauge_psi        (1,1) double = 0          % pressure transducer bound (or u if "standard")
+        Gauge_psi        (1,1) double = 0          % pressure transducer offset bound (or u if "standard")
+        GaugeRel         (1,1) double = 0          % pressure transducer span bound, fraction of reading
         PickWidth_psi    (1,1) double = 0          % one-sided: ramp rate x observation interval
         Coverage         (1,1) double = 2          % k
     end
@@ -91,6 +92,7 @@ classdef UncertaintyBudget < handle
                 opts.ReadDist (1,1) string {mustBeMember(opts.ReadDist, ["rectangular", "triangular", "normal95", "standard"])} = "rectangular"
                 opts.GaugeDist (1,1) string {mustBeMember(opts.GaugeDist, ["rectangular", "triangular", "normal95", "standard"])} = "rectangular"
                 opts.Gauge_psi (1,1) double = 0
+                opts.GaugeRel (1,1) double = 0
                 opts.PickWidth_psi (1,1) double = 0
                 opts.Coverage (1,1) double = 2
             end
@@ -208,7 +210,9 @@ classdef UncertaintyBudget < handle
             g.y     = Pm + (lag + pick) / 2;                 % best estimate of the measurand
             g.uX    = UX / obj.divisor(obj.CompDist);
             g.uT    = UT / obj.divisor(obj.TempDist);
-            g.uG    = obj.Gauge_psi * psi / obj.divisor(obj.GaugeDist);
+            g.uGoff  = obj.Gauge_psi * psi / obj.divisor(obj.GaugeDist);   % offset part
+            g.uGspan = obj.GaugeRel * Pm / obj.divisor(obj.GaugeDist);     % span part (at this reading)
+            g.uG     = hypot(g.uGoff, g.uGspan);
             g.uLag  = lag / sqrt(12);
             g.uPick = pick / sqrt(12);
             g.uRep  = uRep;
