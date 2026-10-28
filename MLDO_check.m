@@ -32,11 +32,15 @@ addpath(fullfile(scriptDir, "src"));
 % --- Model variant -----------------------------------------------------------------
 %   "frozen" : current calibration (workbook "MixtureData - Complete Mixtures.xlsx", preset jL)
 %   "recal"  : C1-nC5 recalibration (workbook "MixtureData - Recalibrated.xlsx", preset jL2)
-cfg.variant = "frozen";
+%   "psia"   : absolute pressures, BIPs and group TIPs refitted (workbook "MixtureData -
+%              Recalibrated psia.xlsx", preset jL3; written by Recalibrate_psia.m)
+cfg.variant = "psia";
 variants = struct( ...
-    'frozen', struct('file', "MixtureData - Complete Mixtures.xlsx", 'preset', "jL"), ...
-    'recal',  struct('file', "MixtureData - Recalibrated.xlsx",     'preset', "jL2"));
+    'frozen', struct('file', "MixtureData - Complete Mixtures.xlsx",  'preset', "jL",  'basis', "recorded"), ...
+    'recal',  struct('file', "MixtureData - Recalibrated.xlsx",      'preset', "jL2", 'basis', "recorded"), ...
+    'psia',   struct('file', "MixtureData - Recalibrated psia.xlsx", 'preset', "jL3", 'basis', "absolute"));
 vsel = variants.(char(cfg.variant));
+cfg.pressureBasis = vsel.basis;        % "absolute": psig rows + 1 atm (entities.PressureBasis)
 cfg.mixtureFile = fullfile(scriptDir, "config", vsel.file);
 cfg.outDir      = fullfile(scriptDir, "results", "mldo_check_" + cfg.variant);
 cfg.compositions = ["nominal", "adjusted"];
@@ -56,7 +60,7 @@ if ~isfolder(cfg.outDir), mkdir(cfg.outDir); end
 psi = entities.DewPointDataset.psi2Pa;
 
 %% 1. Data ---------------------------------------------------------------------------
-bp = readtable(cfg.mixtureFile, 'Sheet', 'Bulk_PVT', 'VariableNamingRule', 'preserve');
+bp = entities.PressureBasis.readSheet(cfg.mixtureFile, "Bulk_PVT", cfg.pressureBasis);
 bp = bp(~ismissing(string(bp.Fluid_ID)) & string(bp.Fluid_ID) ~= "", :);
 mp = readtable(cfg.mixtureFile, 'Sheet', 'Mix_Props', 'VariableNamingRule', 'preserve');
 if ~all(ismember(["Fluid_ID", "Campaign"], string(mp.Properties.VariableNames)))

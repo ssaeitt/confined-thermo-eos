@@ -1,6 +1,8 @@
 classdef DewPointDataset
     % DEWPOINTDATASET Experimental bulk and confined dew points (Mix_Props).
-    % Pressures are stored as in the sheet [psi]; getCase returns SI values.
+    % Pressures are stored in psi on the basis chosen at loading (PressureBasis:
+    % "recorded" = as in the sheet, "absolute" = gauge rows + 1 atm, see
+    % entities.PressureBasis); getCase returns SI values.
     % The confined value is an interval [lower, upper]; its midpoint is the
     % target and its half-width the experimental uncertainty.
 
@@ -18,6 +20,8 @@ classdef DewPointDataset
         ConfUpper_psi  (:,1) double = zeros(0,1)
         PoreRadius_nm  (:,1) double = zeros(0,1)   % optional column; NaN if absent
         Campaign       (:,1) string = string.empty(0,1)   % optional column; "" if absent
+        PressureOffset_psi (:,1) double = zeros(0,1)      % added to the recorded values at loading
+        PressureBasis  (1,1) string = "recorded"          % "recorded" | "absolute"
     end
 
     properties (Dependent)
@@ -30,10 +34,14 @@ classdef DewPointDataset
     end
 
     methods
-        function obj = DewPointDataset(mix, z, rock, T, bulk, lo, up, rp_nm, campaign)
+        function obj = DewPointDataset(mix, z, rock, T, bulk, lo, up, rp_nm, campaign, pOffset, basis)
             if nargin == 0, return; end
             if nargin < 8 || isempty(rp_nm),    rp_nm = nan(numel(mix), 1); end
             if nargin < 9 || isempty(campaign), campaign = strings(numel(mix), 1); end
+            if nargin < 10 || isempty(pOffset), pOffset = zeros(numel(mix), 1); end
+            if nargin < 11 || isempty(basis),   basis = "recorded"; end
+            obj.PressureOffset_psi = pOffset(:);
+            obj.PressureBasis = string(basis);
             obj.PoreRadius_nm = rp_nm(:);
             obj.Campaign = string(campaign(:));
             obj.Mixture = string(mix(:));
@@ -79,7 +87,8 @@ classdef DewPointDataset
                 'PdewConfHalfWidth', obj.ConfHalfWidth_psi(i) * p, ...
                 'HasConfined', obj.HasConfined(i), ...
                 'PoreRadius_m', obj.PoreRadius_nm(i) * 1e-9, ...   % NaN when the sheet has no column
-                'Campaign',   obj.Campaign(i));
+                'Campaign',   obj.Campaign(i), ...
+                'PressureOffset_psi', obj.PressureOffset_psi(i));
         end
 
         function idx = findCases(obj, mixture, rock, z)
@@ -95,9 +104,9 @@ classdef DewPointDataset
         function Tb = toTable(obj)
             zs = cellfun(@(v) "[" + strjoin(string(v.'), ",") + "]", obj.MoleFrac);
             Tb = table(obj.Mixture, zs, obj.Rock, obj.T, obj.BulkPdew_psi, ...
-                obj.ConfLower_psi, obj.ConfUpper_psi, obj.PoreRadius_nm, obj.Campaign, ...
+                obj.ConfLower_psi, obj.ConfUpper_psi, obj.PoreRadius_nm, obj.Campaign, obj.PressureOffset_psi, ...
                 'VariableNames', {'Mixture','z','Rock','T_K','Bulk_psi','ConfLo_psi','ConfUp_psi', ...
-                'rp_nm','Campaign'});
+                'rp_nm','Campaign','P_offset_psi'});
         end
     end
 
@@ -107,6 +116,7 @@ classdef DewPointDataset
                 filePath (1,1) string
                 opts.Sheet (1,1) string = "Mix_Props"
                 opts.DefaultT (1,1) double = 293.15    % used when the sheet has no T column
+                opts.PressureBasis (1,1) string {mustBeMember(opts.PressureBasis, ["recorded", "absolute"])} = "recorded"
             end
             io = detectImportOptions(filePath, 'Sheet', opts.Sheet);
             io.VariableNamingRule = 'preserve';
@@ -122,6 +132,7 @@ classdef DewPointDataset
             keep = ~ismissing(mix) & mix ~= "";
             Tb = Tb(keep, :);
             mix = mix(keep);
+            Tb = entities.PressureBasis.apply(Tb, opts.PressureBasis, opts.Sheet);
 
             zStr = string(Tb.("mole_frac"));
             z = cell(numel(mix), 1);
@@ -146,7 +157,8 @@ classdef DewPointDataset
             obj = entities.DewPointDataset(mix, z, strtrim(string(Tb.("Rock"))), T, ...
                 entities.DewPointDataset.num(Tb.("Bulk_Pdew")), ...
                 entities.DewPointDataset.num(Tb.("Pdew_Exp_lower")), ...
-                entities.DewPointDataset.num(Tb.("Pdew_Exp_upper")), rp, camp);
+                entities.DewPointDataset.num(Tb.("Pdew_Exp_upper")), rp, camp, ...
+                Tb.P_offset_psi, opts.PressureBasis);
         end
     end
 

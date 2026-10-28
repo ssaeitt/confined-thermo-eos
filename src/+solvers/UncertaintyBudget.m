@@ -40,8 +40,15 @@ classdef UncertaintyBudget < handle
     %       "rectangular" sqrt(3) | "triangular" sqrt(6) | "normal95" 2 (bound given
     %       at ~95 %) | "standard" 1 (the figure already is a standard uncertainty)
     %   One-sided effects (detection lag, dew pick during the pressure ramp,
-    %   width w) are rectangular on [0, w]: the measured value is corrected by
-    %   +w/2 and u = w/sqrt(12).
+    %   width w) lie on [0, w]. The dew pick is rectangular: correction +w/2,
+    %   u = w/sqrt(12). The detection lag follows LagDist:
+    %       "rectangular" correction +w/2, u = w/sqrt(12) (liquid read at the
+    %                     volume DetectVolume_cc, anywhere up to w)
+    %       "cloudpoint"  right-triangular with its mode at 0: correction +w/3,
+    %                     u = w/sqrt(18). The dew point is taken at the first
+    %                     cloud-like appearance (Doryani thesis, Sec. 3.2), so a
+    %                     lag near zero is the most likely value and w (the liquid
+    %                     volume DetectVolume_cc) is its upper bound.
     %   Combined standard uncertainty (law of propagation, uncorrelated inputs,
     %   sensitivities by finite difference):
     %       u_c^2 = u_X^2 + u_T^2 + u_gauge^2 + u_lag^2 + u_pick^2 + u_rep^2
@@ -65,6 +72,7 @@ classdef UncertaintyBudget < handle
         TempDist         (1,1) string = "rectangular"
         ReadDist         (1,1) string = "rectangular"
         GaugeDist        (1,1) string = "rectangular"
+        LagDist          (1,1) string = "rectangular"   % "rectangular" | "cloudpoint"
         Gauge_psi        (1,1) double = 0          % pressure transducer offset bound (or u if "standard")
         GaugeRel         (1,1) double = 0          % pressure transducer span bound, fraction of reading
         PickWidth_psi    (1,1) double = 0          % one-sided: ramp rate x observation interval
@@ -91,6 +99,7 @@ classdef UncertaintyBudget < handle
                 opts.TempDist (1,1) string {mustBeMember(opts.TempDist, ["rectangular", "triangular", "normal95", "standard"])} = "rectangular"
                 opts.ReadDist (1,1) string {mustBeMember(opts.ReadDist, ["rectangular", "triangular", "normal95", "standard"])} = "rectangular"
                 opts.GaugeDist (1,1) string {mustBeMember(opts.GaugeDist, ["rectangular", "triangular", "normal95", "standard"])} = "rectangular"
+                opts.LagDist (1,1) string {mustBeMember(opts.LagDist, ["rectangular", "cloudpoint"])} = "rectangular"
                 opts.Gauge_psi (1,1) double = 0
                 opts.GaugeRel (1,1) double = 0
                 opts.PickWidth_psi (1,1) double = 0
@@ -207,13 +216,14 @@ classdef UncertaintyBudget < handle
             psi  = 6894.757;
             if ~isfinite(lag), lag = 0; end
             pick = obj.PickWidth_psi * psi;
-            g.y     = Pm + (lag + pick) / 2;                 % best estimate of the measurand
+            [cLag, dLag] = obj.lagFactors();
+            g.y     = Pm + cLag * lag + pick / 2;            % best estimate of the measurand
             g.uX    = UX / obj.divisor(obj.CompDist);
             g.uT    = UT / obj.divisor(obj.TempDist);
             g.uGoff  = obj.Gauge_psi * psi / obj.divisor(obj.GaugeDist);   % offset part
             g.uGspan = obj.GaugeRel * Pm / obj.divisor(obj.GaugeDist);     % span part (at this reading)
             g.uG     = hypot(g.uGoff, g.uGspan);
-            g.uLag  = lag / sqrt(12);
+            g.uLag  = lag / dLag;
             g.uPick = pick / sqrt(12);
             g.uRep  = uRep;
             g.uTypeB = sqrt(g.uX.^2 + g.uT^2 + g.uG^2 + g.uLag^2 + g.uPick^2);
@@ -233,6 +243,14 @@ classdef UncertaintyBudget < handle
             g.Uc    = obj.Coverage * g.uc;
             g.dev   = M0 - g.y;
             g.En    = g.dev ./ g.Uc;
+        end
+
+        function [c, d] = lagFactors(obj)
+            % Detection lag of width w: correction c*w, standard uncertainty w/d.
+            switch obj.LagDist
+                case "cloudpoint", c = 1/3;  d = sqrt(18);
+                otherwise,         c = 1/2;  d = sqrt(12);
+            end
         end
 
         function u = uTemp(obj, T)

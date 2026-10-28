@@ -33,11 +33,15 @@ addpath(fullfile(scriptDir, "src"));
 % --- Model variant -----------------------------------------------------------------
 %   "frozen" : current calibration (workbook "MixtureData - Complete Mixtures.xlsx", preset jL)
 %   "recal"  : C1-nC5 recalibration (workbook "MixtureData - Recalibrated.xlsx", preset jL2)
-cfg.variant = "frozen";
+%   "psia"   : absolute pressures, BIPs and group TIPs refitted (workbook "MixtureData -
+%              Recalibrated psia.xlsx", preset jL3; written by Recalibrate_psia.m)
+cfg.variant = "psia";
 variants = struct( ...
-    'frozen', struct('file', "MixtureData - Complete Mixtures.xlsx", 'preset', "jL"), ...
-    'recal',  struct('file', "MixtureData - Recalibrated.xlsx",     'preset', "jL2"));
+    'frozen', struct('file', "MixtureData - Complete Mixtures.xlsx",  'preset', "jL",  'basis', "recorded"), ...
+    'recal',  struct('file', "MixtureData - Recalibrated.xlsx",      'preset', "jL2", 'basis', "recorded"), ...
+    'psia',   struct('file', "MixtureData - Recalibrated psia.xlsx", 'preset', "jL3", 'basis', "absolute"));
 vsel = variants.(char(cfg.variant));
+cfg.pressureBasis = vsel.basis;        % "absolute": psig rows + 1 atm (entities.PressureBasis)
 cfg.mixtureFile = fullfile(scriptDir, "config", vsel.file);
 cfg.outDir      = fullfile(scriptDir, "results", "pvt_verification_" + cfg.variant);
 cfg.T           = 293.15;
@@ -53,6 +57,11 @@ cfg.lateCase = struct('Mixture', "C1-nC8", 'Rock', "B1", 'z', [0.9; 0.1]);
 cfg.lateRadii_nm = struct('nominal', 11.25, 'backcalc', 7.82711826617637, ...
                           'backcalc_lo', 7.62188369515433, 'backcalc_hi', 8.04796163088063);
 cfg.lateRadiiToRun = ["nominal", "backcalc"];     % add "backcalc_lo", "backcalc_hi" if wanted
+if cfg.variant == "psia"                          % back-calculated by Recalibrate_psia.m
+    cfg.lateRadii_nm.backcalc    = thermo.RockOffsetTIP.calibrationItem(cfg.mixtureFile, "LateB1_rp_nm");
+    cfg.lateRadii_nm.backcalc_lo = thermo.RockOffsetTIP.calibrationItem(cfg.mixtureFile, "LateB1_rp_lo_nm");
+    cfg.lateRadii_nm.backcalc_hi = thermo.RockOffsetTIP.calibrationItem(cfg.mixtureFile, "LateB1_rp_hi_nm");
+end
 
 % Bubble-point demonstration feeds (liquid-rich; lean feeds have no bubble point)
 cfg.bubble = struct('Mixture', {"C1-nC10", "C1-nC8"}, 'z', {[0.5; 0.5], [0.5; 0.5]}, ...
@@ -75,12 +84,12 @@ if ~isfolder(cfg.outDir), mkdir(cfg.outDir); end
 psi = entities.DewPointDataset.psi2Pa;
 
 %% 1. Data, engines and the rock-offset TIP correlation ------------------------------
-dp = entities.DewPointDataset.loadFromWorkbook(cfg.mixtureFile, 'DefaultT', cfg.T);
+dp = entities.DewPointDataset.loadFromWorkbook(cfg.mixtureFile, 'DefaultT', cfg.T, 'PressureBasis', cfg.pressureBasis);
 isHC = ~contains(dp.Mixture, "CO2");
 idx  = find(dp.HasConfined & isHC).';
 runner = solvers.DewPointRunner(cfg.mixtureFile, cfg.poreRadius);
 for i = idx, runner.engine(dp.Mixture(i), dp.Rock(i)); end
-mpRaw = readtable(cfg.mixtureFile, 'Sheet', 'Mix_Props', 'VariableNamingRule', 'preserve');
+mpRaw = entities.PressureBasis.readSheet(cfg.mixtureFile, "Mix_Props", cfg.pressureBasis);
 hasMLDO = all(ismember(["Fluid_ID", "Campaign", "MLDO_pct", "P_MLDO_psi"], string(mpRaw.Properties.VariableNames)));
 
 tip = thermo.RockOffsetTIP.frozen(cfg.preset, cfg.mixtureFile);

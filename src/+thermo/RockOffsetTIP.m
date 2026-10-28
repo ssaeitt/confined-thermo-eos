@@ -24,6 +24,11 @@ classdef RockOffsetTIP
     %         0.000746; "MixtureData - Recalibrated.xlsx"). Same objective as the
     %         jL fit (RMSE of absolute confined Pdew, FWI-Only, k/p/lambda frozen);
     %         re-derived in MATLAB by Recalibrate_C1nC5.m.
+    %   jL3 : absolute-pressure recalibration (early campaign psig -> psia, BIPs refitted
+    %         on the bulk Pdew, all four group TIPs refitted with k, p, lambda of jL;
+    %         Recalibrate_psia.m). The group TIPs are read from sheet TIP_Groups of the
+    %         workbook that script writes ("MixtureData - Recalibrated psia.xlsx"), so the
+    %         preset always matches the BIPs of that workbook.
     %   w1  : pareto-exact-w1, LL-Tstar (sensitivity; fails the temperature test)
     %   K   = tip.matrix(eos.Fluid, "EF2", T);           % TIP matrix (kijc)
     %   tip.applyTo(eos)                                  % set k, p, lambda on an EOS
@@ -55,7 +60,7 @@ classdef RockOffsetTIP
             % preset "jL" (joint-Linearized, LL-inv_wbar; primary) or
             % "w1" (pareto-exact-w1, LL-Tstar; sensitivity).
             arguments
-                preset       (1,1) string {mustBeMember(preset, ["jL", "jL2", "w1"])}
+                preset       (1,1) string {mustBeMember(preset, ["jL", "jL2", "jL3", "w1"])}
                 workbookFile (1,1) string
             end
             obj = thermo.RockOffsetTIP();
@@ -71,6 +76,11 @@ classdef RockOffsetTIP
                     obj.k = 112.42634826677;  obj.p = 1.3558179290678;  obj.lambda = 2.0916235090532;
                     obj.Descriptor = "inv_wbar";  obj.Form = "LL-inv_wbar";
                     obj.GroupTIPs = [-4.891452765367, -1.96920366521686, -1.44628069292089, -0.754862049795788];
+                case "jL3"
+                    obj.Combination = "joint-linearized (absolute pressures, BIPs and group TIPs refitted)";
+                    obj.k = 112.42634826677;  obj.p = 1.3558179290678;  obj.lambda = 2.0916235090532;
+                    obj.Descriptor = "inv_wbar";  obj.Form = "LL-inv_wbar";
+                    obj.GroupTIPs = thermo.RockOffsetTIP.readGroupTIPs(workbookFile);
                 case "w1"
                     obj.Combination = "pareto-exact-w1";
                     obj.k = 166.410385934507;  obj.p = 1.5488421885245;  obj.lambda = 4.47908205631447;
@@ -97,6 +107,40 @@ classdef RockOffsetTIP
             obj.Descriptor = descriptor;  obj.Form = "LL-" + descriptor;
             obj.GroupTIPs = groupTIPs;
             obj = thermo.RockOffsetTIP.fitCorrelation(obj, workbookFile);
+        end
+
+        function t = readGroupTIPs(workbookFile)
+            % Per-group TIPs from sheet TIP_Groups (columns Group, TIP), order of Groups.
+            if ~ismember("TIP_Groups", string(sheetnames(workbookFile)))
+                error('RockOffsetTIP:NoTIPSheet', ['%s has no sheet TIP_Groups. Run ' ...
+                    'Recalibrate_psia.m, which writes it.'], workbookFile);
+            end
+            G = readtable(workbookFile, 'Sheet', 'TIP_Groups', 'VariableNamingRule', 'preserve', 'TextType', 'string');
+            t = nan(1, numel(thermo.RockOffsetTIP.Groups));
+            for g = 1:numel(t)
+                r = find(strtrim(G.Group) == thermo.RockOffsetTIP.Groups(g), 1);
+                if isempty(r)
+                    error('RockOffsetTIP:NoGroup', 'TIP_Groups has no row %s.', thermo.RockOffsetTIP.Groups(g));
+                end
+                t(g) = G.TIP(r);
+            end
+            if any(~isfinite(t) | t >= 0)
+                error('RockOffsetTIP:BadTIP', 'TIP_Groups: every group TIP must be finite and negative.');
+            end
+        end
+
+        function v = calibrationItem(workbookFile, item)
+            % Numeric item of sheet Calibration_Info (written by Recalibrate_psia.m),
+            % e.g. "LateB1_rp_nm".
+            if ~ismember("Calibration_Info", string(sheetnames(workbookFile)))
+                error('RockOffsetTIP:NoCalibration', ['%s has no sheet Calibration_Info. Run ' ...
+                    'Recalibrate_psia.m, which writes it.'], workbookFile);
+            end
+            C = readtable(workbookFile, 'Sheet', 'Calibration_Info', 'VariableNamingRule', 'preserve', ...
+                          'TextType', 'string');
+            r = find(strtrim(string(C.Item)) == item, 1);
+            if isempty(r), error('RockOffsetTIP:NoItem', 'Calibration_Info has no item %s.', item); end
+            v = str2double(string(C.Value(r)));
         end
 
         function X = descriptor(fl, name, T)

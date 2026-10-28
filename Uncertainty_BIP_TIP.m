@@ -4,13 +4,22 @@
 % laboratory accuracy figures, then re-derives the BIP windows and the TIP
 % corner sets (rock-offset correlation) from those windows.
 %
-% Laboratory figures (experimental section, visual PVT cell):
-%   temperature    5 % of the reading in degC (+-1 degC at 20 degC, +-2 at 40, +-3 at 60)
-%   composition    5-10 % relative on the heavy component(s) as charged
-%   dew detection  by volume: first liquid read at 0.1 cc in a 20 cc cell
-%                  (0.5 % of V_sat) -> measured Pdew lies BELOW the true one
-%   liquid volume  read to 0.1 cc -> MLDO +-0.5 points
-%   pressure gauge high accuracy (not propagated); 1 psi/min depletion, equilibrium assumed
+% Measurement figures (variant "psia": Doryani thesis, Chapter 3, unless stated):
+%   pressure basis early campaign recorded in psig (LabView VI / Druck display), late
+%                  campaign in psia (Q-Com); converted to absolute on loading
+%                  (entities.PressureBasis; laboratory answer of 28 Oct 2026)
+%   pressure       Quartzdyne transducers, 0.015 % of full scale (FS); FS not stated,
+%                  taken as 10,000 psi (cfg.lab.GaugeFS_psi) -> +-1.5 psi bound
+%   temperature    instrument accuracy 0.1 degC (cell); core flood within 0.1 degC
+%   composition    no figure in the thesis (C1 by molar density, liquids by volume at
+%                  constant pressure, 3 days of mixing); 1 / 5 / 10 % kept as scenarios
+%                  (laboratory: below 1 %)
+%   dew detection  first cloud-like appearance; liquid volume at first sight bounded by
+%                  0.1 cc in the 13 cc visual cell (cfg.gum.LagDist = "cloudpoint")
+%   liquid volume  read to 0.1 cc in 13 cc -> MLDO +-0.77 points
+%   depletion      5 psi/min to 100 psi above the expected Pdew, then <= 1 psi/min
+% Variants "recal" and "frozen" keep the figures used before 28 Oct 2026 and the
+% pressures as recorded, so their earlier results are reproduced.
 %
 % 1. Per-point budget (solvers.UncertaintyBudget, bulk EOS, workbook BIPs):
 %      UT  = max |Pdew(T +- dT) - Pdew|
@@ -42,8 +51,8 @@
 %    Output: corner table, alpha/B ranges, and (cfg.predict) the confined-Pdew
 %    prediction envelope over the 8 extreme corners plus the centre.
 %
-% Needs (local): config/<workbook of cfg.variant>.  Nothing here changes the
-% workbook or the frozen presets.
+% Needs (local): config/<workbook of cfg.variant>; for "psia" run Recalibrate_psia.m
+% first (it writes that workbook). Nothing here changes the workbook or the presets.
 
 clear; clc; close all;
 
@@ -52,20 +61,33 @@ if isempty(scriptDir), scriptDir = pwd; end
 addpath(fullfile(scriptDir, "src"));
 
 %% 0. Configuration -----------------------------------------------------------------
-cfg.variant = "recal";         % "recal" (Recalibrated, jL2; current model) | "frozen" (Complete Mixtures, jL)
+cfg.variant = "psia";          % "psia" (absolute pressures, jL3; current model) | "recal" (jL2) | "frozen" (jL)
 variants = struct( ...
-    'frozen', struct('file', "MixtureData - Complete Mixtures.xlsx", 'preset', "jL"), ...
-    'recal',  struct('file', "MixtureData - Recalibrated.xlsx",     'preset', "jL2"));
+    'frozen', struct('file', "MixtureData - Complete Mixtures.xlsx",   'preset', "jL",  'basis', "recorded"), ...
+    'recal',  struct('file', "MixtureData - Recalibrated.xlsx",       'preset', "jL2", 'basis', "recorded"), ...
+    'psia',   struct('file', "MixtureData - Recalibrated psia.xlsx",  'preset', "jL3", 'basis', "absolute"));
 vsel = variants.(char(cfg.variant));
 cfg.file   = fullfile(scriptDir, "config", vsel.file);
 cfg.preset = vsel.preset;                          % source of k, p, lambda
+cfg.pressureBasis = vsel.basis;                    % "absolute": psig rows + 1 atm (entities.PressureBasis)
 cfg.outDir = fullfile(scriptDir, "results", "uncertainty_bip_tip_" + cfg.variant);
 cfg.T      = 293.15;
 
 % Laboratory figures
-cfg.lab = struct('CompRel', [0.01, 0.05, 0.10], 'TempRel', 0.05, 'dT_C', 1, 'CellVolume_cc', 20, ...
-                 'DetectVolume_cc', 0.1, 'Repeat_psi', 0, 'Gauge_psi', 0, 'GaugeRel', 0, ...
-                 'PickWidth_psi', 0, 'SameGauge', true);
+if cfg.variant == "psia"
+    % Doryani thesis, Chapter 3 (see the header); full scale of the transducers not stated
+    cfg.lab = struct('CompRel', [0.01, 0.05, 0.10], 'TempRel', 0.05, 'dT_C', 0.1, 'CellVolume_cc', 13, ...
+                     'DetectVolume_cc', 0.1, 'Repeat_psi', 0, 'GaugeFS_psi', 10000, 'GaugeAccFS', 0.00015, ...
+                     'GaugeRel', 0, 'PickWidth_psi', 0, 'SameGauge', false);
+    cfg.lab.Gauge_psi = cfg.lab.GaugeAccFS * cfg.lab.GaugeFS_psi;     % 1.5 psi bound
+    lagDist = "cloudpoint";
+else
+    cfg.lab = struct('CompRel', [0.01, 0.05, 0.10], 'TempRel', 0.05, 'dT_C', 1, 'CellVolume_cc', 20, ...
+                     'DetectVolume_cc', 0.1, 'Repeat_psi', 0, 'Gauge_psi', 0, 'GaugeRel', 0, ...
+                     'PickWidth_psi', 0, 'SameGauge', true);
+    lagDist = "rectangular";
+end
+% (The notes below describe the figures of variants "recal" / "frozen".)
 % Laboratory answers (27 Oct 2026): temperature +-1 degC both at room temperature
 % (5 % of 20 degC) and in the oven (40, 60 degC) -> dT_C = 1 (bound, rectangular);
 % composition "below 1 %" (gas mixture) against the earlier 5-10 % -> all three kept
@@ -73,7 +95,11 @@ cfg.lab = struct('CompRel', [0.01, 0.05, 0.10], 'TempRel', 0.05, 'dT_C', 1, 'Cel
 % (it may be the 14.7 psi absolute/gauge offset rather than a span error).
 % GaugeRel      : transducer span bound as a fraction of the reading (e.g. 0.004)
 % SameGauge     : bulk (cell) and confined (core) read on the same transducer, so its
-%                 offset cancels in the shift and only the span acts (on the shift)
+%                 offset cancels in the shift and only the span acts (on the shift).
+%                 false for "psia": the cell and the core-flood rig have their own
+%                 transducers (thesis Figs 3.1-3.3), so the offset enters twice.
+% GaugeFS_psi   : full scale of the Quartzdyne transducers (not in the thesis; 10,000
+%                 psi assumed -> 1.5 psi; 20,000 psi would give 3 psi)
 % dT_C          : temperature figure in K; overrides TempRel when finite (e.g. 0.1 from
 %                 the thermostat/RTD calibration, with cfg.gum.TempDist = "standard")
 % Gauge_psi     : pressure transducer accuracy (bound unless GaugeDist = "standard")
@@ -84,11 +110,12 @@ cfg.gum = struct('enable', true, 'Coverage', 2, 'CompDist', "rectangular", 'Temp
                  'ReadDist', "rectangular", 'GaugeDist', "rectangular", ...
                  'repeat_psi', 0, ...                % Type A standard uncertainty added to every row
                  'repeatFromDuplicates', false, ...  % true: use the pooled s of the duplicates instead
-                 'windows', true);                   % BIP windows / WLS from y +- U_c (false: bound bands)
+                 'windows', true, ...                % BIP windows / WLS from y +- U_c (false: bound bands)
+                 'LagDist', lagDist);                % detection lag: "cloudpoint" | "rectangular"
 cfg.mldo = true;                                  % MLDO budget + composition-adjustment check
 % Repeat_psi: optional repeatability bound added in quadrature to U (0 = the
-% laboratory figures only). The two C1-nC8 [0.9, 0.1] bulk values (4110 and 4126 psi,
-% same composition) differ by 16 psi, i.e. a bound of about 8 psi.
+% laboratory figures only). The two C1-nC8 [0.9, 0.1] bulk values (4110 psig and 4126
+% psia, same composition) differ by 1.3 psi on the absolute basis (16 psi as recorded).
 
 % Pairs, BIP search ranges and the rows used
 cfg.pairs     = {["C1", "nC5"], ["C1", "nC8"], ["C1", "nC10"]};
@@ -98,7 +125,7 @@ cfg.excludeComponents = "CO2";                    % CO2 rows are outside this st
 % Confinement
 cfg.poreRadius   = containers.Map({'EF2', 'B1'}, {54e-9, 11.25e-9});
 cfg.lateCase     = struct('Mixture', "C1-nC8", 'Rock', "B1", 'z', [0.9; 0.1]);
-cfg.lateRadius_m = 7.82711826617637e-9;           % back-calculated late-core radius
+cfg.lateRadius_m = 7.82711826617637e-9;           % back-calculated late-core radius (recal / frozen)
 
 % TIP corner sets
 cfg.cornerScenarios = [0.01, 0.10];               % composition scenarios for the corners
@@ -109,6 +136,9 @@ cfg.descriptors     = ["inv_wbar", "inv_Tstar"];
 cfg.predict         = true;                       % prediction envelope (extreme corners + centre)
 
 if ~isfile(cfg.file), error('unc:NoWorkbook', 'Workbook not found (config/ is local only): %s', cfg.file); end
+if cfg.variant == "psia"                          % radius back-calculated by Recalibrate_psia.m
+    cfg.lateRadius_m = thermo.RockOffsetTIP.calibrationItem(cfg.file, "LateB1_rp_nm") * 1e-9;
+end
 if ~isfolder(cfg.outDir), mkdir(cfg.outDir); end
 psi = entities.DewPointDataset.psi2Pa;
 xls = fullfile(cfg.outDir, "uncertainty_bip_tip.xlsx");
@@ -119,13 +149,15 @@ ub = solvers.UncertaintyBudget('CompRel', cfg.lab.CompRel, 'TempRel', cfg.lab.Te
         'CellVolume_cc', cfg.lab.CellVolume_cc, 'DetectVolume_cc', cfg.lab.DetectVolume_cc, ...
         'CompDist', cfg.gum.CompDist, 'TempDist', cfg.gum.TempDist, 'ReadDist', cfg.gum.ReadDist, ...
         'GaugeDist', cfg.gum.GaugeDist, 'Gauge_psi', cfg.lab.Gauge_psi, 'GaugeRel', cfg.lab.GaugeRel, ...
-        'PickWidth_psi', cfg.lab.PickWidth_psi, 'Coverage', cfg.gum.Coverage);
+        'PickWidth_psi', cfg.lab.PickWidth_psi, 'Coverage', cfg.gum.Coverage, 'LagDist', cfg.gum.LagDist);
 gumOn = cfg.gum.enable;
 if ~gumOn, cfg.gum.windows = false; end
 nS = numel(cfg.lab.CompRel);
 
 %% 1. Bulk rows (20 degC, hydrocarbons, unique mixture + z + bulk Pdew) ---------------
-dp = entities.DewPointDataset.loadFromWorkbook(cfg.file, 'DefaultT', cfg.T);
+dp = entities.DewPointDataset.loadFromWorkbook(cfg.file, 'DefaultT', cfg.T, 'PressureBasis', cfg.pressureBasis);
+fprintf('Variant %s: pressures %s (offset %s psi per row)\n', cfg.variant, cfg.pressureBasis, ...
+        strjoin(compose("%.1f", unique(dp.PressureOffset_psi).'), " / "));
 rows = struct('Mixture', {}, 'z', {}, 'T', {}, 'Pm', {}, 'Label', {});
 for i = 1:dp.NumCases
     c = dp.getCase(i);
@@ -238,22 +270,29 @@ if gumOn
 
     % Footnote in the JCED/TRC style (values at the first row's temperature)
     Tf = rows(1).T;
-    ft = sprintf(['Standard uncertainties: u(T) = %.2g K (%s, from %s); u_r(x_heavy) = %s (%s, from %s %% ' ...
-        'relative on the heavy component as charged); u(p_gauge) = %.2g psi + %.2g %% of reading; detection lag (%.2g cm3 in %.3g cm3) and ' ...
-        'dew pick (%.3g psi) one-sided: value corrected by +w/2, u = w/sqrt(12); u_rep = %.2g psi. ' ...
+    [cL, dL] = ub.lagFactors();
+    if cfg.pressureBasis == "absolute"
+        pTxt = sprintf('Pressures are absolute (gauge records + %.3f psi). ', entities.PressureBasis.Atm_psi);
+    else
+        pTxt = 'Pressures as recorded (no gauge/absolute conversion). ';
+    end
+    ft = sprintf(['%sStandard uncertainties: u(T) = %.2g K (%s, from %s); ' ...
+        'u_r(x_heavy) = %s (%s, from %s %% relative on the heavy component as charged); u(p_gauge) = %.2g psi + %.2g %% of reading; ' ...
+        'detection lag (liquid at first sight <= %.2g cm3 in %.3g cm3; %s): value corrected by +w/%g, u = w/sqrt(%g); ' ...
+        'dew pick (%.3g psi): +w/2, u = w/sqrt(12); u_rep = %.2g psi. ' ...
         'Expanded uncertainty U_c(p_dew) = k u_c with k = %g (%s level of confidence).'], ...
-        ub.uTemp(Tf), cfg.gum.TempDist, localTempText(cfg, Tf), strjoin(compose("%.3g", ub.uCompRel), " / "), ...
+        pTxt, ub.uTemp(Tf), cfg.gum.TempDist, localTempText(cfg, Tf), strjoin(compose("%.3g", ub.uCompRel), " / "), ...
         cfg.gum.CompDist, strjoin(compose("%g", 100 * cfg.lab.CompRel), " / "), ...
         cfg.lab.Gauge_psi / solvers.UncertaintyBudget.divisor(cfg.gum.GaugeDist), ...
         100 * cfg.lab.GaugeRel / solvers.UncertaintyBudget.divisor(cfg.gum.GaugeDist), cfg.lab.DetectVolume_cc, ...
-        cfg.lab.CellVolume_cc, cfg.lab.PickWidth_psi, uRep / psi, ub.Coverage, localConf(ub.Coverage));
+        cfg.lab.CellVolume_cc, cfg.gum.LagDist, 1 / cL, dL^2, cfg.lab.PickWidth_psi, uRep / psi, ub.Coverage, localConf(ub.Coverage));
     writetable(table(string(ft), 'VariableNames', {'Footnote'}), xls, 'Sheet', 'GUM_Footnote');
     fprintf('\n%s\n\n', ft);
 end
 
 %% 2b. MLDO budget (Bulk_PVT: all fluids and temperatures) ----------------------------------
 if cfg.mldo
-    bp = readtable(cfg.file, 'Sheet', 'Bulk_PVT', 'VariableNamingRule', 'preserve');
+    bp = entities.PressureBasis.readSheet(cfg.file, "Bulk_PVT", cfg.pressureBasis);
     mRows = {};  gmRows = {};
     for i = 1:height(bp)
         mix = string(bp.Mixture(i));
