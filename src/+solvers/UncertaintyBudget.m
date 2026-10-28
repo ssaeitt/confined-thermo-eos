@@ -276,25 +276,36 @@ classdef UncertaintyBudget < handle
         end
 
         function lag = detectionLag(obj, pt, T, z, Psat, Kdew, Vsat)
+            % Pressure drop below Psat at which the liquid volume reaches
+            % DetectFraction of V_sat. Coarse scan for the first step with enough
+            % liquid, then bisection between the last converged point without
+            % enough liquid (Psat itself to start with: no liquid at the dew point)
+            % and that step. Flash failures are skipped, never used as bracket ends
+            % (the former fzero bracket could take a failed point and fell back to
+            % the step edge, so the lag came out as one of the step sizes).
             psi = 6894.757;
             target = 100 * obj.DetectFraction;          % [% of V_sat]
             f = @(P) solvers.UncertaintyBudget.ldo(pt, P, T, z, Kdew, Vsat) - target;
-            steps = [0.02, 0.1, 0.5, 2, 5, 10, 20, 40, 80, 150, 300, 600] * psi;
-            lag = NaN;  prevP = Psat * (1 - 1e-7);
+            steps = [0.02, 0.1, 0.5, 1, 2, 5, 10, 20, 40, 80, 150, 300, 600] * psi;
+            lag = NaN;  Plo = Psat;
             for s = steps
                 P = Psat - s;
                 if P <= 0, break; end
                 v = f(P);
-                if isfinite(v) && v >= 0
-                    try
-                        Pd = fzero(f, [P, prevP], optimset('TolX', 0.01 * psi));
-                        lag = Psat - Pd;
-                    catch
-                        lag = Psat - P;                     % bracket edge (conservative)
+                if ~isfinite(v), continue; end
+                if v < 0, Plo = P; continue; end
+                Phi = P;
+                for it = 1:60
+                    if Plo - Phi < 0.01 * psi, break; end
+                    Pm = 0.5 * (Plo + Phi);  vm = f(Pm);
+                    if ~isfinite(vm)                     % flash failed: try off-centre
+                        Pm = Plo - 0.3 * (Plo - Phi);  vm = f(Pm);
+                        if ~isfinite(vm), break; end
                     end
-                    return;
+                    if vm >= 0, Phi = Pm; else, Plo = Pm; end
                 end
-                prevP = P;
+                lag = Psat - 0.5 * (Plo + Phi);
+                return;
             end
         end
     end
@@ -334,6 +345,7 @@ classdef UncertaintyBudget < handle
         function v = ldo(pt, P, T, z, Kseed, Vsat)
             % Liquid volume in % of V_sat at P (CCE basis, PVTExperiments.cce).
             r = pt.solve(P, T, z, Inf, 'K_seed', Kseed);
+            if ~r.converged, r = pt.solve(P, T, z, Inf); end     % retry without the warm start
             if ~r.converged, v = NaN; return; end
             if r.phases == 1, v = 0; return; end
             v = 100 * r.SL * r.V_total / Vsat;
