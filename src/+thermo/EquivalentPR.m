@@ -136,33 +136,67 @@ classdef EquivalentPR
             end
         end
 
-        function writeGEM(eqs, filePath)
-            % CMG GEM fluid-model block, one EOS set per element of eqs
-            % (assign with the grid EOS-type keyword). GEM expects Pc in atm.
-            % Verify keyword names/units against the GEM manual of your
-            % version before use; this is a template, not a validated deck.
+        function writeGEM(eqs, filePath, opts)
+            % CMG GEM fluid-model block, one EOS set per element of eqs; assign
+            % the sets to grid blocks with *EOSTYPE in the deck (after this block).
+            % Format validated in GEM 2025.20 with a no-flow CCE deck (1 Nov 2026):
+            % every cell matched the MATLAB flash to |dSo| <= 5e-4 and densities to
+            % 0.002 lb/ft3. Rules from the GEM manual and that check:
+            %   - *HCFLAG 0 for all components, otherwise GEM overwrites the
+            %     HC-HC BINs with its PVC3 correlation (default PVC3 = 0 -> BIN 0);
+            %   - *TRES in the deck temperature unit (deg F under *INUNIT *FIELD);
+            %   - no viscosity keyword before *EOSSET 1: they sit in set 1 and
+            %     later sets inherit them;
+            %   - *PHASEID *GAS (gas-condensate: the default *DEN labelled confined
+            %     single-phase gas as oil) and *CRITDELD -1 (no critical-region
+            %     flash skipping near the dew point).
+            % Pc in atm, Tc in K, Vc in m3/kmol (converted from the stored unit).
             arguments
                 eqs (1,:) thermo.EquivalentPR
                 filePath (1,1) string
+                opts.UnitSystem (1,1) string {mustBeMember(opts.UnitSystem, ["FIELD", "SI"])} = "FIELD"
+                opts.PhaseID (1,1) string {mustBeMember(opts.PhaseID, ["GAS", "OIL", "DEN", "CRIT", "TCMIX"])} = "GAS"
+                opts.CritDelD (1,1) double = -1
             end
             thermo.EquivalentPR.checkCompatible(eqs);
             fid = thermo.EquivalentPR.openFile(filePath);
             c = onCleanup(@() fclose(fid));
             e1 = eqs(1);
             nc = numel(e1.ComponentNames);
+            Tc_C = e1.T - 273.15;
+            if opts.UnitSystem == "FIELD"
+                tres = Tc_C * 9/5 + 32;  tunit = 'deg F (*INUNIT *FIELD)';
+            else
+                tres = Tc_C;             tunit = 'deg C (*INUNIT *SI)';
+            end
             fprintf(fid, '** Confined EOS, exact standard-PR equivalent (FWI-only), T = %.2f K\n', e1.T);
-            fprintf(fid, '** Valid ONLY isothermally at this T. Pc in atm, Tc in K.\n');
+            fprintf(fid, '** Valid ONLY isothermally at this T. Pc in atm, Tc in K, Vc in m3/kmol.\n');
+            fprintf(fid, '** Generated %s. Assign sets with *EOSTYPE after this block.\n', ...
+                    string(datetime('now', 'Format', 'yyyy-MM-dd HH:mm')));
             fprintf(fid, '*MODEL *PR\n*NC %d %d\n', nc, nc);
             fprintf(fid, '*COMPNAME');
             fprintf(fid, ' ''%s''', e1.ComponentNames);
-            fprintf(fid, '\n');
+            fprintf(fid, '\n** HCFLAG 0: keep the BINs below (1 would replace HC-HC BINs by the PVC3 correlation)\n');
+            fprintf(fid, '*HCFLAG\n');
+            fprintf(fid, ' %d', zeros(1, nc));
+            fprintf(fid, '\n*TRES %.4g   ** %s\n', tres, tunit);
+            fprintf(fid, '*PHASEID *%s\n', opts.PhaseID);
+            fprintf(fid, '*CRITDELD %g\n', opts.CritDelD);
+            vcGEM = thermo.EquivalentPR.vcToGEM(e1.Vc);
             for k = 1:numel(eqs)
                 e = eqs(k);
                 fprintf(fid, '\n** ---- EOS set %d : %s | rock %s | r_p = %.3f nm\n', k, e.Label, ...
                         e.RockName, e.r_cap * 1e9);
-                if numel(eqs) > 1, fprintf(fid, '*EOSSET %d\n', k); end
+                fprintf(fid, '*EOSSET %d\n', k);
+                if k == 1
+                    % Viscosity input only in set 1 (inherited by later sets)
+                    fprintf(fid, '*VISCOR *HZYT\n*MIXVC 1.0\n*VISCOEFF\n');
+                    fprintf(fid, ' 0.1023 0.023364 0.058533 -0.040758 0.0093324\n');
+                end
                 thermo.EquivalentPR.gemVec(fid, '*TCRIT', e.Tc);
                 thermo.EquivalentPR.gemVec(fid, '*PCRIT', e.Pc / 101325);
+                thermo.EquivalentPR.gemVec(fid, '*VCRIT', vcGEM);
+                thermo.EquivalentPR.gemVec(fid, '*VISVC', vcGEM);
                 thermo.EquivalentPR.gemVec(fid, '*AC',    e.omega);
                 thermo.EquivalentPR.gemVec(fid, '*MW',    e.MW);
                 thermo.EquivalentPR.gemVec(fid, '*OMEGA', e.OmegaA);
@@ -175,7 +209,6 @@ classdef EquivalentPR
                     fprintf(fid, '\n');
                 end
             end
-            fprintf(fid, '\n*TRES %.2f   ** deg C\n', e1.T - 273.15);
         end
     end
 
@@ -289,6 +322,19 @@ classdef EquivalentPR
             for k = 1:numel(eqs)
                 fprintf(fid, ' %.10g', getter(eqs(k)));
                 fprintf(fid, ' /\n');
+            end
+        end
+
+        function v = vcToGEM(vc)
+            % Critical volume to m3/kmol whatever unit the workbook used:
+            % m3/mol (~1e-4), m3/kmol or L/mol (~0.1-1), cm3/mol (~100-1000).
+            m = median(vc(vc > 0));
+            if m < 0.01
+                v = vc * 1e3;
+            elseif m > 10
+                v = vc / 1e3;
+            else
+                v = vc;
             end
         end
 
