@@ -151,12 +151,17 @@ classdef EquivalentPR
             %     single-phase gas as oil) and *CRITDELD -1 (no critical-region
             %     flash skipping near the dew point).
             % Pc in atm, Tc in K, Vc in m3/kmol (converted from the stored unit).
+            % Vc enters GEM only through the LBC viscosity (*VISVC). opts.VcOverride
+            % (struct, field = component name, value in m3/kmol) replaces the
+            % workbook value for the named components, e.g. struct('C1', 0.0986).
+            % GEM 2025.20 check (2 Nov 2026): LBC uses the volume-shifted density.
             arguments
                 eqs (1,:) thermo.EquivalentPR
                 filePath (1,1) string
                 opts.UnitSystem (1,1) string {mustBeMember(opts.UnitSystem, ["FIELD", "SI"])} = "FIELD"
                 opts.PhaseID (1,1) string {mustBeMember(opts.PhaseID, ["GAS", "OIL", "DEN", "CRIT", "TCMIX"])} = "GAS"
                 opts.CritDelD (1,1) double = -1
+                opts.VcOverride (1,1) struct = struct()
             end
             thermo.EquivalentPR.checkCompatible(eqs);
             fid = thermo.EquivalentPR.openFile(filePath);
@@ -183,6 +188,10 @@ classdef EquivalentPR
             fprintf(fid, '*PHASEID *%s\n', opts.PhaseID);
             fprintf(fid, '*CRITDELD %g\n', opts.CritDelD);
             vcGEM = thermo.EquivalentPR.vcToGEM(e1.Vc);
+            for f = string(fieldnames(opts.VcOverride)).'
+                j = find(e1.ComponentNames == f, 1);
+                if ~isempty(j), vcGEM(j) = opts.VcOverride.(f); end
+            end
             for k = 1:numel(eqs)
                 e = eqs(k);
                 fprintf(fid, '\n** ---- EOS set %d : %s | rock %s | r_p = %.3f nm\n', k, e.Label, ...
@@ -328,8 +337,15 @@ classdef EquivalentPR
         function v = vcToGEM(vc)
             % Critical volume to m3/kmol whatever unit the workbook used:
             % m3/mol (~1e-4), m3/kmol or L/mol (~0.1-1), cm3/mol (~100-1000).
+            % Values ~1e-7 (as in the MixtureData workbooks up to Nov 2026, which
+            % hold cm3/mol x 1e-9) are scaled by 1e6, with a warning.
             m = median(vc(vc > 0));
-            if m < 0.01
+            if m < 1e-5
+                warning('EquivalentPR:VcUnit', ['Stored Vc median %.3g is below any ' ...
+                    'physical m3/mol value; read as cm3/mol x 1e-9 and scaled by 1e6. ' ...
+                    'Fix the Comp_Props Vc column (m3/mol).'], m);
+                v = vc * 1e6;
+            elseif m < 0.01
                 v = vc * 1e3;
             elseif m > 10
                 v = vc / 1e3;

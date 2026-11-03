@@ -47,6 +47,12 @@ cfg.outDir      = fullfile(scriptDir, "results", "pvt_verification_" + cfg.varia
 cfg.T           = 293.15;
 cfg.kB          = 1.380649e-23;                                % [J/K]
 cfg.poreRadius  = containers.Map({'EF2', 'B1'}, {54e-9, 11.25e-9});   % nominal radii [m]
+% Extra radii per rock (nm), verified and exported besides the nominal one: the EF2
+% net-stress radii of the thesis (54 nm at the lowest stress, then 45 and 38 nm).
+cfg.extraRadii_nm = containers.Map({'EF2'}, {[45, 38]});
+% GEM *VCRIT/*VISVC (m3/kmol) for the LBC viscosity, overriding the workbook values;
+% these are the values used in the validated Fractured Well decks (Poling et al.).
+cfg.gemVc = struct('C1', 0.0986, 'nC8', 0.492);
 
 % --- Frozen model ---------------------------------------------------------------
 cfg.preset = vsel.preset;              % "jL" | "jL2" (from cfg.variant) | "w1" (sensitivity)
@@ -279,11 +285,14 @@ if ~isempty(eqRegions)
         inSet = find(sets == setName);
         [~, keep] = unique(labels(inSet), 'stable');      % one region per rock and r_p
         grp = eqRegions(inSet(keep));
-        % Bulk region (r_p = Inf): standard PR with the workbook BIPs, listed first
+        % Bulk region (r_p = Inf): standard PR with the workbook BIPs, listed LAST,
+        % because GEM uses the last EOS set for the surface separator and standard
+        % conditions; the GEM block then goes into a field deck unchanged.
         eosB = runner.engine(strjoin(grp(1).ComponentNames, "-"), cfg.lateCase.Rock).eos;
-        grp  = [thermo.EquivalentPR.fromEOS(eosB, cfg.T, Inf, "bulk-" + setName), grp]; %#ok<AGROW>
+        grp  = [grp, thermo.EquivalentPR.fromEOS(eosB, cfg.T, Inf, "bulk-" + setName)]; %#ok<AGROW>
         thermo.EquivalentPR.writeE300(grp, fullfile(expDir, setName + "_E300_PROPS.inc"));
-        thermo.EquivalentPR.writeGEM(grp,  fullfile(expDir, setName + "_GEM_EOS.inc"));
+        thermo.EquivalentPR.writeGEM(grp,  fullfile(expDir, setName + "_GEM_EOS.inc"), ...
+                                     'VcOverride', cfg.gemVc);
         for k = 1:numel(grp)
             grp(k).writeTable(fullfile(expDir, grp(k).Label + ".csv"));
         end
@@ -293,7 +302,8 @@ end
 
 %% Local functions ------------------------------------------------------------------------------
 function [radii, labels] = localRadii(cfg, c)
-    % Late B1 core: every radius in cfg.lateRadiiToRun; other cases: nominal rock radius.
+    % Late B1 core: every radius in cfg.lateRadiiToRun; other cases: nominal rock
+    % radius plus any cfg.extraRadii_nm for the rock (labels "r45nm", ...).
     L = cfg.lateCase;
     isLate = c.Mixture == L.Mixture && c.Rock == L.Rock && numel(c.z) == numel(L.z) ...
              && max(abs(c.z(:) - L.z(:))) < 1e-9;
@@ -306,6 +316,11 @@ function [radii, labels] = localRadii(cfg, c)
     else
         labels = "nominal";
         radii  = cfg.poreRadius(char(c.Rock));
+        if isKey(cfg.extraRadii_nm, char(c.Rock))
+            extra  = cfg.extraRadii_nm(char(c.Rock));
+            labels = [labels, compose("r%gnm", extra)];
+            radii  = [radii, extra * 1e-9];
+        end
     end
 end
 
