@@ -35,11 +35,14 @@ addpath(fullfile(scriptDir, "src"));
 %   "recal"  : C1-nC5 recalibration (workbook "MixtureData - Recalibrated.xlsx", preset jL2)
 %   "psia"   : absolute pressures, BIPs and group TIPs refitted (workbook "MixtureData -
 %              Recalibrated psia.xlsx", preset jL3; written by Recalibrate_psia.m)
+%   "psiamax": jL3-max, upper-BIP calibration (workbook "MixtureData - Recalibrated psia
+%              max.xlsx", preset jL3; written by Make_jL3max_workbook.m)
 cfg.variant = "psia";
 variants = struct( ...
     'frozen', struct('file', "MixtureData - Complete Mixtures.xlsx",  'preset', "jL",  'basis', "recorded"), ...
     'recal',  struct('file', "MixtureData - Recalibrated.xlsx",      'preset', "jL2", 'basis', "recorded"), ...
-    'psia',   struct('file', "MixtureData - Recalibrated psia.xlsx", 'preset', "jL3", 'basis', "absolute"));
+    'psia',   struct('file', "MixtureData - Recalibrated psia.xlsx", 'preset', "jL3", 'basis', "absolute"), ...
+    'psiamax', struct('file', "MixtureData - Recalibrated psia max.xlsx", 'preset', "jL3", 'basis', "absolute"));
 vsel = variants.(char(cfg.variant));
 cfg.pressureBasis = vsel.basis;        % "absolute": psig rows + 1 atm (entities.PressureBasis)
 cfg.mixtureFile = fullfile(scriptDir, "config", vsel.file);
@@ -63,7 +66,7 @@ cfg.lateCase = struct('Mixture', "C1-nC8", 'Rock', "B1", 'z', [0.9; 0.1]);
 cfg.lateRadii_nm = struct('nominal', 11.25, 'backcalc', 7.82711826617637, ...
                           'backcalc_lo', 7.62188369515433, 'backcalc_hi', 8.04796163088063);
 cfg.lateRadiiToRun = ["nominal", "backcalc"];     % add "backcalc_lo", "backcalc_hi" if wanted
-if cfg.variant == "psia"                          % back-calculated by Recalibrate_psia.m
+if ismember(cfg.variant, ["psia", "psiamax"])                          % back-calculated by Recalibrate_psia.m
     cfg.lateRadii_nm.backcalc    = thermo.RockOffsetTIP.calibrationItem(cfg.mixtureFile, "LateB1_rp_nm");
     cfg.lateRadii_nm.backcalc_lo = thermo.RockOffsetTIP.calibrationItem(cfg.mixtureFile, "LateB1_rp_lo_nm");
     cfg.lateRadii_nm.backcalc_hi = thermo.RockOffsetTIP.calibrationItem(cfg.mixtureFile, "LateB1_rp_hi_nm");
