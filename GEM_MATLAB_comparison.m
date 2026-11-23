@@ -7,8 +7,8 @@
 %         P_psia, phases, SL, rhoL_kgm3, rhoV_kgm3, x_nC8, y_nC8, Z_L, Z_V, converged
 %         results/gem_comparison/matlab_dewpoints.csv  dew point per set
 %  The same pressures are the GEM block pressures, so GEM, MATLAB and the Python
-%  reference (tools/gem_comparison/python_<tag>.csv) are compared block by block
-%  with tools/gem_comparison/compare_cce.py.
+%  reference (tools/gem_comparison/python_<tag>.csv) can be compared
+%  with tools/gem_comparison/read_gem_cce.py and compare_gem_matlab.py.
 %
 %  SL = liquid volume / total volume at P, the same basis as GEM's oil saturation
 %  in a block with no water. Densities are mass densities with the volume shift.
